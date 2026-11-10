@@ -35,3 +35,7 @@ Ask the agent to review a PR, branch or patch, for example "review PR 123 and sh
 - `assets/template.html`: the review page
 - `references/`: two worked examples, one flowchart review and one sequence review
 - `evals/`: test cases for the skill
+
+## License
+
+MIT
