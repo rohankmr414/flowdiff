@@ -36,21 +36,27 @@ The order matters: understand the flow as it exists first, then overlay the diff
    - An unchanged function that reads or writes data the PR changed (a new field, a new return value, a new exception) belongs in the flow with a `notes` entry explaining why, even though it has no hunk. Data stored before the change is a classic: a new nullable field means old rows take the other branch.
    - Write the flow's `description` for someone outside the PR: who triggers this entry point, and what the flow promises when it finishes.
 
-6. **Write `flows.json`.** Fields are listed below, and `references/example.json` is a complete one built from a small Python diff. Read it before writing your first. The fields that carry the review:
+6. **Number the risks.** A risk is something that can go wrong in production because of this PR: a race, a lost message, a caller that now breaks, data that takes the wrong branch. For each one write a `risks` entry on the flow with a short `title` stating the failure, a `severity`, a `detail` giving the concrete sequence that triggers it, and a `fix` when a small one exists. Then point at it: add the risk's `id` to the `risks` list of every node, function or edge where it happens. The renderer numbers the risks across the review, prints the number on the diagram coloured by severity, and lists them beside it, so the reader sees where each problem sits in the flow. In a sequence flow the number is drawn on messages only, so put every risk on the message where it happens; a risk on a function there shows only when the participant is clicked.
+   - `high`: loses or corrupts data, breaks an existing caller, or opens a security hole. `medium`: wrong behaviour a user can hit. `low`: worth knowing, not worth blocking.
+   - A risk that is not on any diagram, such as a broken import in an untouched file, still gets an entry; say where it is in `detail`.
+   - `notes` are for context that is not a failure: what an external system guarantees, why an unchanged node is drawn.
+   - Skip this step only when the user asked to understand a change and not to review it. No risks found is a valid result: leave `risks` out and say so in the reply.
+
+7. **Write `flows.json`.** Fields are listed below, and `references/example.json` is a complete one built from a small Python diff. Read it before writing your first. The fields that carry the review:
    - `change`: the behavioural delta in 12 words or fewer. "retries 3× on gateway timeout", not "added a for loop".
-   - `notes`: what a reviewer would say. Callers that do not handle a new return value, an error path that now skips cleanup, an ordering that changed. Leave it out when there is nothing to say.
+   - `notes`: context a reviewer needs that is not a failure. Failures go in `risks` (step 6). Leave it out when there is nothing to say.
    - `callers`: call sites not drawn in this flow (see step 5). Required on every changed function.
 
    `diff` is the hunk text for that function, copied from `pr.diff`. Trim it to the function. Nodes with no hunk leave it out.
 
-7. **Render and open.**
+8. **Render and open.**
    ```bash
    python3 <this skill>/scripts/render.py flows.json -o review.html --md review.md
    open review.html        # macOS; xdg-open on Linux, start on Windows
    ```
    The script validates first and exits non-zero naming the problem. Fix and rerun.
 
-8. **Reply.** One line per flow: what changes and the biggest risk, then the path to `review.html`. If the user wants a PR comment, give them `review.md`. Its Mermaid blocks render natively on GitHub and GitLab.
+9. **Reply.** One line per flow: what changes and its highest-severity risk by number, then the path to `review.html`. If the user wants a PR comment, give them `review.md`. Its Mermaid blocks render natively on GitHub and GitLab.
 
 ## Keeping a flow reviewable
 
@@ -88,12 +94,20 @@ flows        [flow]
     notes        string | [string]   reviewer observations, shown highlighted
     callers      [string]      call sites not drawn in this flow; required on changed functions, [] if none
     diff         string        unified-diff hunk text for this function
+    risks        [risk id]     risks that happen here; also allowed on a function and on an edge
     functions    [function]    sequence participants only: the changed functions inside this component;
                                each has label, status, file, line, change, notes, callers, diff as above
   edges        [edge]
     from, to     node ids
     label        string        optional, e.g. "on success"
     status       added | removed | unchanged   (default unchanged)
+    risks        [risk id]
+  risks        [risk]          numbered across the review in the order written
+    id           string        unique within the flow, e.g. "enqueue-before-commit"
+    title        string        the failure, in one line
+    severity     high | medium | low
+    detail       string        the concrete sequence that triggers it
+    fix          string        optional
 ```
 
 ## Files

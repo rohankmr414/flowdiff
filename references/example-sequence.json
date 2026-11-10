@@ -16,7 +16,9 @@
           "id": "page",
           "label": "Checkout page",
           "shape": "entry",
-          "notes": "Still treats any 2xx as paid and shows the thank-you screen. With 202 pending it must poll or say 'processing'."
+          "risks": [
+            "202-read-as-paid"
+          ]
         },
         {
           "id": "create_order",
@@ -58,14 +60,14 @@
               "file": "shop/webhooks.py",
               "line": 1,
               "change": "marks order paid on payment.succeeded, enqueues receipt",
-              "notes": [
-                "Race: the webhook can land before create_order has saved the order. find_by_intent returns None, the handler answers 200, the gateway never retries, and the order stays pending forever. Answer 5xx for an unknown intent, or save the order before calling create_intent.",
-                "No signature check on the webhook body: anyone can mark an order paid.",
-                "Not idempotent: a redelivered event enqueues a second receipt."
-              ],
               "callers": [],
               "diff": "@@ -0,0 +1,10 @@\n+def on_payment(event):\n+    if event[\"type\"] != \"payment.succeeded\":\n+        return 200\n+    order = find_by_intent(event[\"intent_id\"])\n+    if order is None:\n+        return 200\n+    order.status = \"paid\"\n+    save_order(order)\n+    queue.enqueue(send_receipt, order.id)\n+    return 200",
-              "label": "on_payment()"
+              "label": "on_payment()",
+              "risks": [
+                "webhook-before-save",
+                "no-signature",
+                "double-receipt"
+              ]
             },
             {
               "label": "find_by_intent()",
@@ -74,8 +76,10 @@
               "line": 41,
               "change": "looks an order up by its gateway intent id",
               "callers": [],
-              "notes": "Linear scan over all orders, and intent_id has no index or unique constraint.",
-              "diff": "@@ -40,0 +41,5 @@\n+def find_by_intent(intent_id):\n+    for order in all_orders():\n+        if order.intent_id == intent_id:\n+            return order\n+    return None"
+              "diff": "@@ -40,0 +41,5 @@\n+def find_by_intent(intent_id):\n+    for order in all_orders():\n+        if order.intent_id == intent_id:\n+            return order\n+    return None",
+              "risks": [
+                "linear-scan"
+              ]
             }
           ],
           "status": "added"
@@ -132,13 +136,21 @@
           "from": "gateway",
           "to": "on_payment",
           "label": "payment.succeeded (async, may arrive now)",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "webhook-before-save",
+            "no-signature"
+          ]
         },
         {
           "from": "on_payment",
           "to": "db",
           "label": "find_by_intent(intent_id)",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "webhook-before-save",
+            "linear-scan"
+          ]
         },
         {
           "from": "create_order",
@@ -156,7 +168,10 @@
           "from": "create_order",
           "to": "page",
           "label": "202 pending (was 201 paid)",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "202-read-as-paid"
+          ]
         },
         {
           "from": "on_payment",
@@ -168,7 +183,46 @@
           "from": "on_payment",
           "to": "send_receipt",
           "label": "enqueue(order.id)",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "double-receipt"
+          ]
+        }
+      ],
+      "risks": [
+        {
+          "id": "webhook-before-save",
+          "severity": "high",
+          "title": "The webhook can arrive before the order is saved",
+          "detail": "find_by_intent returns None, the handler answers 200, the gateway never retries, and the order stays pending forever.",
+          "fix": "Answer 5xx for an unknown intent, or save the order before calling create_intent."
+        },
+        {
+          "id": "no-signature",
+          "severity": "high",
+          "title": "The webhook body is not verified",
+          "detail": "Anyone who can reach the endpoint can mark an order paid.",
+          "fix": "Check the gateway's signature header before reading the event."
+        },
+        {
+          "id": "202-read-as-paid",
+          "severity": "medium",
+          "title": "The checkout page shows 'paid' for a pending order",
+          "detail": "It treats any 2xx as paid and shows the thank-you screen.",
+          "fix": "Poll the order status, or show 'processing' on 202."
+        },
+        {
+          "id": "double-receipt",
+          "severity": "medium",
+          "title": "A redelivered event sends a second receipt",
+          "detail": "on_payment is not idempotent and the gateway delivers at least once.",
+          "fix": "Return early when the order is already paid."
+        },
+        {
+          "id": "linear-scan",
+          "severity": "low",
+          "title": "find_by_intent scans every order",
+          "detail": "intent_id has no index or unique constraint."
         }
       ]
     }

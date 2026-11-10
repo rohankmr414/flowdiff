@@ -1,6 +1,6 @@
 # flowdiff
 
-An agent skill that reviews a git diff or pull request as diagrams: flowcharts for control flow inside a component, sequence diagrams for how components collaborate. Each changed function is marked added, modified or removed, and clicking it shows the real hunk and reviewer notes.
+An agent skill that reviews a git diff or pull request as diagrams: flowcharts for control flow inside a component, sequence diagrams for how components collaborate. Each changed function is marked added, modified or removed, and clicking it shows the real hunk and reviewer notes. Risks are numbered, marked on the diagram where they happen, and listed with severity and a suggested fix.
 
 Needs Python 3 (standard library only). The generated page loads Mermaid from a CDN.
 

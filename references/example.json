@@ -19,9 +19,11 @@
           "file": "shop/api.py",
           "line": 7,
           "change": "applies coupon, stores charge_id, returns discount",
-          "notes": "InvalidCoupon is not caught here or in any middleware shown in the diff, so a bad coupon code becomes a 500 rather than a 400.",
           "diff": "@@ -7,9 +8,10 @@ def create_order(req):\n def create_order(req):\n     order = validate_order(req.json)\n+    order = apply_coupon(order, req.json.get(\"coupon\"))\n     reserve_stock(order)\n-    charge(order.customer_id, order.total)\n+    order.charge_id = charge(order.customer_id, order.total, idempotency_key=order.id)\n     save_order(order)\n-    return {\"id\": order.id, \"total\": order.total}\n+    return {\"id\": order.id, \"total\": order.total, \"discount\": order.discount}",
-          "callers": []
+          "callers": [],
+          "risks": [
+            "coupon-500"
+          ]
         },
         {
           "id": "validate_order",
@@ -41,7 +43,10 @@
             "Mutates order.total in place, so everything downstream (stock, charge, response) sees the discounted total. Intended, but worth confirming."
           ],
           "diff": "@@ -0,0 +1,16 @@\n+COUPONS = {\"WELCOME10\": 0.10, \"VIP25\": 0.25}\n+\n+\n+class InvalidCoupon(Exception):\n+    pass\n+\n+\n+def apply_coupon(order, code: str | None):\n+    if not code:\n+        return order\n+    rate = COUPONS.get(code.upper())\n+    if rate is None:\n+        raise InvalidCoupon(code)\n+    order.discount = round(order.total * rate, 2)\n+    order.total = round(order.total - order.discount, 2)\n+    return order",
-          "callers": []
+          "callers": [],
+          "risks": [
+            "coupon-500"
+          ]
         },
         {
           "id": "reserve_stock",
@@ -56,9 +61,11 @@
           "file": "shop/payments.py",
           "line": 6,
           "change": "idempotent on idempotency_key via in-memory _seen",
-          "notes": "_seen is a module-level dict: idempotency does not survive a restart and is not shared across replicas. Fine for a single process, misleading otherwise.",
           "diff": "@@ -1,5 +1,15 @@\n import gateway\n \n+_seen: dict[str, str] = {}\n \n-def charge(customer_id: str, amount: float) -> str:\n-    return gateway.charge(customer_id, amount)\n+\n+def charge(customer_id: str, amount: float, idempotency_key: str) -> str:\n+    if idempotency_key in _seen:\n+        return _seen[idempotency_key]\n+    charge_id = gateway.charge(customer_id, amount)\n+    _seen[idempotency_key] = charge_id\n+    return charge_id",
-          "callers": []
+          "callers": [],
+          "risks": [
+            "seen-in-memory"
+          ]
         },
         {
           "id": "gateway_charge",
@@ -103,12 +110,31 @@
         {
           "from": "charge",
           "to": "gateway_charge",
-          "label": "first time only"
+          "label": "first time only",
+          "risks": [
+            "seen-in-memory"
+          ]
         },
         {
           "from": "charge",
           "to": "save_order",
           "label": "charge_id"
+        }
+      ],
+      "risks": [
+        {
+          "id": "coupon-500",
+          "severity": "medium",
+          "title": "A bad coupon code returns 500",
+          "detail": "InvalidCoupon is not caught in create_order or in any middleware shown in the diff.",
+          "fix": "Catch InvalidCoupon in create_order and return 400."
+        },
+        {
+          "id": "seen-in-memory",
+          "severity": "medium",
+          "title": "Idempotency does not survive a restart",
+          "detail": "_seen is a module-level dict, so it is lost on restart and not shared across replicas. A retry that lands on another process charges twice.",
+          "fix": "Store the key with the order, or pass it to the gateway."
         }
       ]
     },
@@ -125,16 +151,21 @@
           "file": "shop/api.py",
           "line": 16,
           "change": "refunds the charge before marking cancelled",
-          "notes": "If refund() raises, stock is already released and the status is never saved: the order stays 'new' with its stock gone. Consider refunding before release_stock or saving status first.",
           "diff": "@@ -16,6 +19,8 @@ def cancel_order(req):\n def cancel_order(req):\n     order = load_order(req.params[\"id\"])\n     release_stock(order)\n+    if order.charge_id:\n+        refund(order.charge_id)\n     order.status = \"cancelled\"\n     save_order(order)\n     return {\"status\": order.status}",
-          "callers": []
+          "callers": [],
+          "risks": [
+            "refund-after-release"
+          ]
         },
         {
           "id": "load_order",
           "label": "load_order()",
           "file": "shop/orders.py",
           "status": "unchanged",
-          "notes": "Unchanged, but orders saved before this deploy have no charge_id, so cancelling them skips the refund branch. Needs a backfill or a fallback lookup."
+          "notes": "Unchanged, but it now returns orders with or without a charge_id.",
+          "risks": [
+            "legacy-no-charge-id"
+          ]
         },
         {
           "id": "release_stock",
@@ -157,9 +188,11 @@
           "file": "shop/payments.py",
           "line": 14,
           "change": "calls gateway.refund(charge_id)",
-          "notes": "No idempotency guard, unlike charge(). A retried cancel refunds twice.",
           "diff": "@@ -1,5 +1,15 @@\n+def refund(charge_id: str) -> None:\n+    gateway.refund(charge_id)",
-          "callers": []
+          "callers": [],
+          "risks": [
+            "double-refund"
+          ]
         },
         {
           "id": "gateway_refund",
@@ -211,13 +244,42 @@
           "from": "refund",
           "to": "save_order",
           "label": "status=cancelled",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "refund-after-release"
+          ]
         },
         {
           "from": "has_charge",
           "to": "save_order",
           "label": "no",
-          "status": "added"
+          "status": "added",
+          "risks": [
+            "legacy-no-charge-id"
+          ]
+        }
+      ],
+      "risks": [
+        {
+          "id": "refund-after-release",
+          "severity": "high",
+          "title": "A failed refund leaves stock released and the order uncancelled",
+          "detail": "release_stock runs before refund. If refund raises, the status is never saved: the order stays 'new' with its stock gone.",
+          "fix": "Refund before release_stock, or save the status first."
+        },
+        {
+          "id": "legacy-no-charge-id",
+          "severity": "high",
+          "title": "Orders placed before this deploy are cancelled without a refund",
+          "detail": "They have no charge_id, so they take the 'no' branch.",
+          "fix": "Backfill charge_id, or fall back to a gateway lookup."
+        },
+        {
+          "id": "double-refund",
+          "severity": "medium",
+          "title": "A retried cancel refunds twice",
+          "detail": "refund() has no idempotency guard, unlike charge().",
+          "fix": "Skip the refund when the order is already cancelled."
         }
       ]
     }

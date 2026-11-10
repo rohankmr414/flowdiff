@@ -16,6 +16,8 @@ EDGES = {"unchanged": ("-->", "-- {} -->"), "added": ("==>", "== {} ==>"), "remo
 # markdown needs literal colors; the html page styles thick/dotted edges from css instead
 EDGE_COLOR = {"added": "#059669", "removed": "#e11d48"}
 SIGN = {"added": "+ ", "modified": "~ ", "removed": "- ", "unchanged": ""}
+SEVERITIES = ("high", "medium", "low")
+CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 SEQ_RECT = {"added": "rgb(209,250,229)", "removed": "rgb(255,228,230)"}
 CLASSDEFS = [
     "classDef added fill:#d1fae5,stroke:#059669,color:#064e3b",
@@ -23,6 +25,16 @@ CLASSDEFS = [
     "classDef removed fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-dasharray:6 4",
     "classDef unchanged fill:#f1f5f9,stroke:#64748b,color:#334155",
 ]
+
+
+def circled(n):
+    return CIRCLED[n - 1] if n <= len(CIRCLED) else f"({n})"
+
+
+def marks(x, flow):
+    """Circled numbers of the risks a node, function or edge points at, with a leading space."""
+    nums = {r["id"]: r["_n"] for r in flow.get("risks") or []}
+    return "".join(" " + circled(nums[i]) for i in x.get("risks") or [])
 
 
 def esc(s):
@@ -63,6 +75,17 @@ def validate(doc):
                     errs.append(f"{fid}/{n.get('id')}: function needs a label and a valid status: {x.get('label')!r}")
                 if st != "unchanged" and n.get("shape", "step") != "decision" and not isinstance(x.get("callers"), list):
                     errs.append(f"{fid}/{n.get('id')}: changed function {x.get('label')!r} needs a callers list ([] if every caller is drawn)")
+        rids = [r.get("id") for r in f.get("risks") or []]
+        if len(rids) != len(set(rids)):
+            errs.append(f"{fid}: duplicate risk ids")
+        for r in f.get("risks") or []:
+            if not r.get("id") or not r.get("title") or r.get("severity") not in SEVERITIES:
+                errs.append(f"{fid}: risk needs id, title and severity in {SEVERITIES}: {r.get('id')!r}")
+        refs = [x for n in nodes for x in [n] + (n.get("functions") or [])] + (f.get("edges") or [])
+        for x in refs:
+            for i in x.get("risks") or []:
+                if i not in rids:
+                    errs.append(f"{fid}: {x.get('label') or x.get('id') or x} points at unknown risk {i!r}")
         for e in f.get("edges") or []:
             for k in ("from", "to"):
                 if e.get(k) not in ids:
@@ -78,10 +101,11 @@ def sequence(flow, target, mid):
         st = n.get("status", "unchanged")
         tag = f"<br/>{st}" if target == "md" and st != "unchanged" and not n.get("functions") else ""
         tag += "".join(f"<br/>{SIGN[x.get('status', 'unchanged')]}{esc(x['label'])}" for x in n.get("functions") or [])
+        # risk numbers go on messages only; participant boxes stay clean
         lines.append(f"  participant {mid[n['id']]} as {esc(n['label'])}{tag}")
     for e in flow.get("edges") or []:
         st = e.get("status", "unchanged")
-        msg = f"  {mid[e['from']]}{'--x' if st == 'removed' else '->>'}{mid[e['to']]}: {esc(e.get('label') or 'call')}"
+        msg = f"  {mid[e['from']]}{'--x' if st == 'removed' else '->>'}{mid[e['to']]}: {esc(e.get('label') or 'call')}{marks(e, flow)}"
         # markdown cannot be styled from css, so tint the changed message's background
         lines += [f"  rect {SEQ_RECT[st]}", "  " + msg, "  end"] if target == "md" and st in SEQ_RECT else [msg]
     return "\n".join(lines), {v: k for k, v in mid.items()}
@@ -95,16 +119,17 @@ def mermaid(flow, target):
     lines = ["flowchart " + flow.get("direction", "TD")]
     for n in flow["nodes"]:
         if target == "html":
-            label = f"<b>{esc(n['label'])}</b>" + (f"<br/><small>{esc(n['change'])}</small>" if n.get("change") else "")
+            label = f"<b>{esc(n['label'])}</b>" + marks(n, flow) + (f"<br/><small>{esc(n['change'])}</small>" if n.get("change") else "")
         else:
-            label = esc(n["label"]) + (f"<br/>{esc(n['change'])}" if n.get("change") else "")
+            label = esc(n["label"]) + marks(n, flow) + (f"<br/>{esc(n['change'])}" if n.get("change") else "")
         shape = SHAPES[n.get("shape", "step")].format(label)
         lines.append(f"  {mid[n['id']]}{shape}:::{n.get('status', 'unchanged')}")
     styles = []
     for i, e in enumerate(flow.get("edges") or []):
         st = e.get("status", "unchanged")
         plain, labeled = EDGES[st]
-        arrow = labeled.format(f'"{esc(e["label"])}"') if e.get("label") else plain
+        text = (esc(e.get("label") or "") + marks(e, flow)).strip()
+        arrow = labeled.format(f'"{text}"') if text else plain
         lines.append(f"  {mid[e['from']]} {arrow} {mid[e['to']]}")
         if target == "md" and st in EDGE_COLOR:
             styles.append(f"  linkStyle {i} stroke:{EDGE_COLOR[st]},stroke-width:2px")
@@ -126,6 +151,11 @@ def markdown(doc):
                 out.append(f"  - ⚠ {note}")
             if n.get("callers"):
                 out.append(f"  - also called from: {', '.join(n['callers'])}")
+        if f.get("risks"):
+            out += ["", "**Risks**", ""]
+        for r in f.get("risks") or []:
+            fix = f" Fix: {r['fix']}" if r.get("fix") else ""
+            out.append(f"- {circled(r['_n'])} **{r['severity']}** · **{r['title']}**: {r.get('detail', '')}{fix}".rstrip(": "))
         out.append("")
     if doc.get("other"):
         out += ["## Other changes", ""] + [f"- {o}" for o in doc["other"]] + [""]
@@ -144,7 +174,11 @@ def main():
     if errs:
         print("flows.json invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
         sys.exit(1)
+    count = 0
     for f in doc["flows"]:
+        for r in f.get("risks") or []:  # numbered across the whole review, in the order written
+            count += 1
+            r["_n"] = count
         for n in f["nodes"]:
             if n.get("functions"):  # a component is modified when any of its functions changed
                 n.setdefault("status", "modified" if any(x.get("status", "unchanged") != "unchanged" for x in n["functions"]) else "unchanged")

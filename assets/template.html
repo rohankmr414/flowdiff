@@ -98,6 +98,13 @@ table.diff tr.h td{background:var(--d-hunk);color:var(--d-hunk-fg);padding:2px 1
 pre.err{margin:0;padding:12px;font:12px/1.5 var(--mono);color:var(--rem);white-space:pre-wrap}
 .fn{border-top:1px solid var(--border);margin-top:14px;padding-top:12px}
 .fn h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;font:600 13px var(--mono)}
+.risk{color:var(--rem)!important;font-weight:600;font-size:14px}.risk.medium{color:var(--mod)!important}.risk.low{color:var(--unc)!important}
+tspan.risk{fill:var(--rem)!important;font-size:14px!important}tspan.risk.medium{fill:var(--mod)!important}tspan.risk.low{fill:var(--unc)!important}
+ol.risks{list-style:none;margin:10px 0 0;padding:0}
+ol.risks li{display:grid;grid-template-columns:22px 1fr;gap:0 8px;padding:10px 0;border-top:1px solid var(--border)}
+ol.risks .rn{width:20px;height:20px;border-radius:50%;border:1.5px solid var(--rem);color:var(--rem);font:600 11px/17px var(--sans);text-align:center}
+ol.risks .rn.medium{border-color:var(--mod);color:var(--mod)}ol.risks .rn.low{border-color:var(--unc);color:var(--unc)}
+ol.risks strong{font-weight:600}ol.risks p{grid-column:2;margin:4px 0 0;color:var(--muted)}ol.risks p.fix{color:var(--text)}
 .back{display:inline-block;margin-top:12px;color:var(--accent);text-decoration:none}
 </style>
 </head>
@@ -139,7 +146,7 @@ function initMermaid() {
 const SIGN = { added: "+ ", modified: "~ ", removed: "- " };
 const changedOf = f => f.nodes.flatMap(n => n.functions || [n]).filter(n => n.status && n.status !== "unchanged");
 const listedOf = f => f.nodes.filter(n => (n.status && n.status !== "unchanged") || n.notes); // noted unchanged nodes too
-$("eyebrow").textContent = `diff review · ${doc.flows.length} flow${doc.flows.length === 1 ? "" : "s"} · ${doc.flows.reduce((a, f) => a + changedOf(f).length, 0)} changed functions`;
+$("eyebrow").textContent = `diff review · ${doc.flows.length} flow${doc.flows.length === 1 ? "" : "s"} · ${doc.flows.reduce((a, f) => a + changedOf(f).length, 0)} changed functions · ${doc.flows.reduce((a, f) => a + (f.risks || []).length, 0)} risks`;
 $("title").textContent = doc.title || "Diff flowchart";
 $("summary").textContent = doc.summary || "";
 $("other").innerHTML = (doc.other || []).map(o => `<li>${h(o)}</li>`).join("");
@@ -162,6 +169,9 @@ async function show(i) {
     $("chart").querySelectorAll("rect.actor[name]").forEach(r => { const mid = r.getAttribute("name"), n = f.nodes.find(n => n.id === f._ids[mid]); if (!n) return; r.dataset.mid = mid; r.classList.add(n.status || "unchanged");
       r.parentElement.querySelectorAll("text.actor tspan").forEach((t, k) => { if (k && n.functions?.[k - 1]) t.classList.add("fn-" + (n.functions[k - 1].status || "unchanged")); }); // line 0 is the component name
       r.onclick = () => showNode(n, mid); });
+    // risk numbers arrive as plain circled digits; wrap them so they can be coloured
+    const sev = n => doc.flows.flatMap(x => x.risks || []).find(r => r._n === n)?.severity || "high"; // ① is U+2460
+    $("chart").querySelectorAll(".messageText, .edgeLabel p, .node span.nodeLabel").forEach(el => { if (/[\u2460-\u2473]/.test(el.textContent)) el.innerHTML = el.innerHTML.replace(/[\u2460-\u2473]/g, m => { const tag = el instanceof SVGElement ? "tspan" : "span"; return `<${tag} class="risk ${sev(m.charCodeAt(0) - 0x245f)}">${m}</${tag}>`; }); });
     $("chart").querySelectorAll(".messageLine0,.messageLine1").forEach((l, j) => l.classList.add("msg-" + (f.edges[j]?.status || "unchanged")));
   } catch (e) {
     document.querySelectorAll("body > div[id^=\"dm\"], body > svg").forEach(el => el.remove()); // mermaid's error bomb
@@ -170,11 +180,16 @@ async function show(i) {
   showOverview(f);
 }
 
+const riskList = rs => rs.length ? `<ol class="risks">${rs.map(r => `<li><span class="rn ${r.severity}">${r._n}</span><span><strong>${h(r.title)}</strong> <small>${r.severity}</small></span>
+    ${r.detail ? `<p>${h(r.detail)}</p>` : ""}${r.fix ? `<p class="fix">Fix: ${h(r.fix)}</p>` : ""}</li>`).join("")}</ol>` : "";
+const risksOf = x => (doc.flows[cur].risks || []).filter(r => (x.risks || []).includes(r.id));
+
 function showOverview(f) {
   document.querySelectorAll(".sel").forEach(e => e.classList.remove("sel"));
   $("panel").innerHTML = `<div class="card"><h2><i class="dot"></i>${h(f.title)}</h2><p class="hint">${h(f.description || "")}</p>
-    <ul class="changed">${listedOf(f).map(n => `<li data-id="${h(n.id)}"><i class="dot ${n.status || "unchanged"}"></i><strong>${h(n.label)}</strong><small>${h(n.functions ? n.functions.map(x => (SIGN[x.status] || "") + x.label).join("  ") : n.change || (n.notes ? "unchanged, see note" : n.status))}</small></li>`).join("")}</ul></div>`;
-  $("panel").querySelectorAll("li").forEach(li => li.onclick = () => {
+    <ul class="changed">${listedOf(f).map(n => `<li data-id="${h(n.id)}"><i class="dot ${n.status || "unchanged"}"></i><strong>${h(n.label)}</strong><small>${h(n.functions ? n.functions.map(x => (SIGN[x.status] || "") + x.label).join("  ") : n.change || (n.notes ? "unchanged, see note" : n.status))}</small></li>`).join("")}</ul></div>
+    ${f.risks?.length ? `<div class="card"><h2><i class="dot removed"></i>Risks</h2>${riskList(f.risks)}</div>` : ""}`;
+  $("panel").querySelectorAll("ul.changed li").forEach(li => li.onclick = () => {
     const n = f.nodes.find(n => n.id === li.dataset.id);
     showNode(n, Object.keys(f._ids).find(m => f._ids[m] === n.id));
   });
@@ -198,6 +213,7 @@ const detail = n => { const notes = n.notes ? [].concat(n.notes) : []; return `
     <p class="file">${h(n.file || "")}${n.line ? ":" + n.line : ""}</p>
     ${n.change ? `<p class="hint">${h(n.change)}</p>` : ""}
     ${notes.length ? `<div class="notes">${notes.map(x => `<p>${h(x)}</p>`).join("")}</div>` : ""}
+    ${riskList(risksOf(n))}
     ${Array.isArray(n.callers) ? `<p class="callers">${n.callers.length ? "Also called from " + n.callers.map(c => `<code>${h(c)}</code>`).join(", ") : "No callers outside this flow."}</p>` : ""}
     ${n.diff ? renderDiff(n.diff, n.line) : ""}`; };
 const pill = s => `<span class="pill ${s || "unchanged"}">${s || "unchanged"}</span>`;
