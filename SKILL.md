@@ -51,10 +51,12 @@ The order matters: understand the flow as it exists first, then overlay the diff
 
 8. **Render and open.**
    ```bash
-   python3 <this skill>/scripts/render.py flows.json -o review.html --md review.md
+   python3 <this skill>/scripts/render.py flows.json -o review.html --md review.md --root .
    open review.html        # macOS; xdg-open on Linux, start on Windows
    ```
    The script validates first and exits non-zero naming the problem. Fix and rerun.
+
+   `--root` is the directory that holds the code as it is after the change (the PR branch checked out, or the patched tree). Each node's `file` is read relative to it and embedded, so a reviewer can click a hunk header in the page to see the rest of that function, and no further. The function's extent comes from the node's `line` (its first line in the post-change file) and `end_line`. If the files there do not match the hunks, for example the working tree is still on the base branch, the page shows the hunks without the expand control.
 
 9. **Reply.** One line per flow: what changes and its highest-severity risk by number, then the path to `review.html`. If the user wants a PR comment, give them `review.md`. Its Mermaid blocks render natively on GitHub and GitLab.
 
@@ -89,7 +91,8 @@ flows        [flow]
     status       added | modified | removed | unchanged   (default unchanged)
     shape        step | decision | entry | store           (default step)
     file         string        path, optional
-    line         number        optional
+    line         number        first line of the function in the post-change file; needed for expanding the diff
+    end_line     number        last line of the function; optional, guessed from indentation when left out
     change       string        behavioural delta, 12 words or fewer, shown inside the node
     notes        string | [string]   reviewer observations, shown highlighted
     callers      [string]      call sites not drawn in this flow; required on changed functions, [] if none
@@ -112,7 +115,7 @@ flows        [flow]
 
 ## Files
 
-- `scripts/render.py` validates `flows.json`, builds the Mermaid source, writes `review.html` and, with `--md`, Mermaid markdown. Python 3, stdlib only.
+- `scripts/render.py` validates `flows.json`, embeds the changed files found under `--root`, builds the Mermaid source, writes `review.html` and, with `--md`, Mermaid markdown. Python 3, stdlib only.
 - `assets/template.html` is the page: flow tabs, the diagram, a side panel with the clicked function's hunk, notes and undrawn callers, a light/dark toggle, and a Copy Mermaid button for pasting into a PR. It loads Mermaid from a CDN, so it needs network to render.
 - `references/example.json` is a complete worked example; `references/example-review.html` is what it renders to.
 - `references/example-sequence.json` is a sequence flow: a blocking charge replaced by an async webhook, where the review finding is a race.

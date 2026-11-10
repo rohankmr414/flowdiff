@@ -95,6 +95,7 @@ table.diff td.code{padding-right:16px;width:100%}
 table.diff tr.a td{background:var(--d-add)}table.diff tr.a td.ln{background:var(--d-add-num)}
 table.diff tr.d td{background:var(--d-del)}table.diff tr.d td.ln{background:var(--d-del-num)}
 table.diff tr.h td{background:var(--d-hunk);color:var(--d-hunk-fg);padding:2px 12px}
+table.diff tr.h.x{cursor:pointer}table.diff tr.h.x:hover td{filter:brightness(.95)}
 pre.err{margin:0;padding:12px;font:12px/1.5 var(--mono);color:var(--rem);white-space:pre-wrap}
 .fn{border-top:1px solid var(--border);margin-top:14px;padding-top:12px}
 .fn h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;font:600 13px var(--mono)}
@@ -195,19 +196,72 @@ function showOverview(f) {
   });
 }
 
-// unified diff → github-style table with old/new line numbers
-function renderDiff(text, startLine) {
-  let o = startLine || 1, nw = startLine || 1, rows = "";
-  for (const l of text.split("\n")) {
-    const m = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (m) { o = +m[1]; nw = +m[2]; rows += `<tr class="h"><td colspan="4">${h(l)}</td></tr>`; continue; }
-    const c = l[0], body = l.slice(1);
-    if (c === "+") rows += `<tr class="a"><td class="ln"></td><td class="ln">${nw++}</td><td class="sign">+</td><td class="code">${h(body)}</td></tr>`;
-    else if (c === "-") rows += `<tr class="d"><td class="ln">${o++}</td><td class="ln"></td><td class="sign">-</td><td class="code">${h(body)}</td></tr>`;
-    else if (l !== "") rows += `<tr><td class="ln">${o++}</td><td class="ln">${nw++}</td><td class="sign"></td><td class="code">${h(body)}</td></tr>`;
+// unified diff → github-style table. With the file embedded, a click on a hunk header shows the rest of the function.
+function mountDiff(el, n) {
+  const file = doc._files?.[n.file]?.replace(/\n$/, "").split("\n"), hunks = [];
+  for (const l of n.diff.split("\n")) {
+    if (l.startsWith("@@")) hunks.push({ head: l, lines: [] });
+    else if (l !== "") (hunks.at(-1) || hunks[hunks.push({ head: "", lines: [] }) - 1]).lines.push(l);
   }
-  return `<div class="diffwrap"><table class="diff">${rows}</table></div>`;
+  for (const k of hunks) {
+    const m = k.head.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)/), want = k.lines.filter(l => l[0] !== "-").map(l => l.slice(1));
+    k.o = m ? +m[1] : n.line || 1; k.n = m ? +m[2] : n.line || 1; k.len = want.length; k.up = 0;
+    if (!file || !want.length) continue;
+    // find the hunk by content: a hunk trimmed to one function often carries stale line numbers
+    let best = -1;
+    for (let i = 0; i + want.length <= file.length; i++)
+      if (want.every((w, j) => file[i + j] === w) && (best < 0 || Math.abs(i + 1 - k.n) < Math.abs(best + 1 - k.n))) best = i;
+    if (best >= 0) { k.o += best + 1 - k.n; k.n = best + 1; k.ok = true; }
+  }
+  const last = hunks.at(-1), end = last?.ok ? last.n + last.len : 0;
+  // expansion stops at the function: n.line is its first line, n.end_line its last (guessed from indentation if absent)
+  const lo = file && n.line >= 1 ? n.line : Infinity, hi = file && n.line >= 1 ? n.end_line || fnEnd(file, n.line) : 0;
+  let down = 0;
+  const floor = i => Math.max(lo, i && hunks[i - 1].ok ? hunks[i - 1].n + hunks[i - 1].len : 1); // first hidden line that may be shown above hunk i
+  const row = (cls, o, nw, sign, body) => `<tr class="${cls}"><td class="ln">${o}</td><td class="ln">${nw}</td><td class="sign">${sign}</td><td class="code">${h(body)}</td></tr>`;
+  const draw = () => {
+    let rows = "";
+    hunks.forEach((k, i) => {
+      const canUp = k.ok && k.n - k.up > floor(i);
+      if (k.head || canUp) rows += `<tr class="h${canUp ? " x" : ""}" data-i="${i}"><td colspan="4">${canUp ? "↑ " : ""}${h(k.head || "start of function")}</td></tr>`;
+      for (let j = k.n - k.up; k.ok && j < k.n; j++) rows += row("", "", j, "", file[j - 1]); // old numbers are unknown outside the hunk
+      let o = k.o, nw = k.n;
+      for (const l of k.lines) {
+        if (l[0] === "+") rows += row("a", "", nw++, "+", l.slice(1));
+        else if (l[0] === "-") rows += row("d", o++, "", "-", l.slice(1));
+        else rows += row("", o++, nw++, "", l.slice(1));
+      }
+    });
+    if (end) {
+      for (let j = end; j < end + down; j++) rows += row("", "", j, "", file[j - 1]);
+      if (end + down <= hi) rows += `<tr class="h x" data-i="down"><td colspan="4">↓ rest of function</td></tr>`;
+    }
+    el.innerHTML = `<table class="diff">${rows}</table>`;
+    el.querySelectorAll("tr.x").forEach(tr => tr.onclick = () => {
+      const i = tr.dataset.i;
+      if (i === "down") down = hi - end + 1;
+      else hunks[i].up = hunks[i].n - floor(+i);
+      draw();
+    });
+  };
+  draw();
 }
+// last line of the block that starts at line `start`: the next line indented no deeper ends it, a closing bracket or `end` belongs to it
+// ponytail: indentation guess, fine for formatted code; set end_line in flows.json when it guesses wrong
+function fnEnd(file, start) {
+  const ind = l => l.match(/^\s*/)[0].length, base = ind(file[start - 1] ?? "");
+  let lastCode = start;
+  for (let j = start + 1; j <= file.length; j++) {
+    const l = file[j - 1];
+    if (!l.trim()) continue;
+    if (ind(l) < base) break;
+    if (ind(l) === base) { if (/^\s*[)\]]/.test(l)) { lastCode = j; continue; } if (/^\s*(\}|end\b)/.test(l)) lastCode = j; break; }
+    lastCode = j;
+  }
+  return lastCode;
+}
+const diffs = []; // nodes waiting for their diff table to be mounted after the panel html is set
+const mountDiffs = () => { $("panel").querySelectorAll("[data-diff]").forEach(el => mountDiff(el, diffs[el.dataset.diff])); diffs.length = 0; };
 
 const detail = n => { const notes = n.notes ? [].concat(n.notes) : []; return `
     <p class="file">${h(n.file || "")}${n.line ? ":" + n.line : ""}</p>
@@ -215,7 +269,7 @@ const detail = n => { const notes = n.notes ? [].concat(n.notes) : []; return `
     ${notes.length ? `<div class="notes">${notes.map(x => `<p>${h(x)}</p>`).join("")}</div>` : ""}
     ${riskList(risksOf(n))}
     ${Array.isArray(n.callers) ? `<p class="callers">${n.callers.length ? "Also called from " + n.callers.map(c => `<code>${h(c)}</code>`).join(", ") : "No callers outside this flow."}</p>` : ""}
-    ${n.diff ? renderDiff(n.diff, n.line) : ""}`; };
+    ${n.diff ? `<div class="diffwrap" data-diff="${diffs.push(n) - 1}"></div>` : ""}`; };
 const pill = s => `<span class="pill ${s || "unchanged"}">${s || "unchanged"}</span>`;
 
 function showNode(n, mid) {
@@ -226,6 +280,7 @@ function showNode(n, mid) {
   $("panel").innerHTML = `<div class="card"><h2 class="mono"><i class="dot ${status}"></i>${h(n.label)}${pill(status)}</h2>${detail(n)}
     ${(n.functions || []).map(x => `<div class="fn"><h3><i class="dot ${x.status || "unchanged"}"></i>${h((SIGN[x.status] || "") + x.label)}${pill(x.status)}</h3>${detail(x)}</div>`).join("")}
     <a href="#" class="back" id="back">← back to flow</a></div>`;
+  mountDiffs();
   $("back").onclick = e => { e.preventDefault(); showOverview(doc.flows[cur]); };
 }
 

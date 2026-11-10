@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Render flows.json to a standalone HTML review page, optionally Mermaid markdown.
 
-usage: render.py flows.json [-o review.html] [--md review.md]
+usage: render.py flows.json [-o review.html] [--md review.md] [--root REPO]
 """
 import argparse
 import html
@@ -167,6 +167,7 @@ def main():
     ap.add_argument("flows")
     ap.add_argument("-o", "--out", default="review.html")
     ap.add_argument("--md", help="also write Mermaid markdown (for PR comments)")
+    ap.add_argument("--root", default=".", help="directory holding the post-change source, so diffs can expand to the full function")
     a = ap.parse_args()
 
     doc = json.loads(Path(a.flows).read_text())
@@ -174,6 +175,15 @@ def main():
     if errs:
         print("flows.json invalid:\n  " + "\n  ".join(errs), file=sys.stderr)
         sys.exit(1)
+    # embed the changed files so the page can expand a hunk's context, like github
+    # ponytail: whole files inline, capped at 200 KB each; switch to line windows if pages get heavy
+    files = {}
+    for f in doc["flows"]:
+        for x in [x for n in f["nodes"] for x in [n] + (n.get("functions") or [])]:
+            src = Path(a.root) / x["file"] if x.get("diff") and x.get("file") else None
+            if src and src.is_file() and src.stat().st_size < 200_000:
+                files[x["file"]] = src.read_text(errors="replace")
+    doc["_files"] = files
     count = 0
     for f in doc["flows"]:
         for r in f.get("risks") or []:  # numbered across the whole review, in the order written
