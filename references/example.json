@@ -1,0 +1,225 @@
+{
+  "title": "PR #412: coupons, idempotent charges, refunds on cancel",
+  "summary": "Adds coupon discounts to order creation, makes charge() idempotent on order id, and refunds the charge when an order is cancelled. Two request flows change: create order and cancel order.",
+  "other": [
+    "Order dataclass gains discount and charge_id fields (shop/orders.py)",
+    "No tests added for apply_coupon, charge idempotency, or refund"
+  ],
+  "flows": [
+    {
+      "id": "create-order",
+      "title": "Create order",
+      "description": "POST /orders, called by the checkout page. Promises a saved order that is paid for and has its stock reserved. This PR inserts a coupon step before stock reservation and makes the charge idempotent on the order id.",
+      "nodes": [
+        {
+          "id": "create_order",
+          "label": "POST /orders → create_order()",
+          "shape": "entry",
+          "status": "modified",
+          "file": "shop/api.py",
+          "line": 7,
+          "change": "applies coupon, stores charge_id, returns discount",
+          "notes": "InvalidCoupon is not caught here or in any middleware shown in the diff, so a bad coupon code becomes a 500 rather than a 400.",
+          "diff": "@@ -7,9 +8,10 @@ def create_order(req):\n def create_order(req):\n     order = validate_order(req.json)\n+    order = apply_coupon(order, req.json.get(\"coupon\"))\n     reserve_stock(order)\n-    charge(order.customer_id, order.total)\n+    order.charge_id = charge(order.customer_id, order.total, idempotency_key=order.id)\n     save_order(order)\n-    return {\"id\": order.id, \"total\": order.total}\n+    return {\"id\": order.id, \"total\": order.total, \"discount\": order.discount}",
+          "callers": []
+        },
+        {
+          "id": "validate_order",
+          "label": "validate_order()",
+          "file": "shop/orders.py",
+          "status": "unchanged"
+        },
+        {
+          "id": "apply_coupon",
+          "label": "apply_coupon()",
+          "status": "added",
+          "file": "shop/pricing.py",
+          "line": 8,
+          "change": "discounts total by coupon rate, raises InvalidCoupon",
+          "notes": [
+            "Lookup is case-insensitive via upper(); COUPONS has no expiry or usage cap.",
+            "Mutates order.total in place, so everything downstream (stock, charge, response) sees the discounted total. Intended, but worth confirming."
+          ],
+          "diff": "@@ -0,0 +1,16 @@\n+COUPONS = {\"WELCOME10\": 0.10, \"VIP25\": 0.25}\n+\n+\n+class InvalidCoupon(Exception):\n+    pass\n+\n+\n+def apply_coupon(order, code: str | None):\n+    if not code:\n+        return order\n+    rate = COUPONS.get(code.upper())\n+    if rate is None:\n+        raise InvalidCoupon(code)\n+    order.discount = round(order.total * rate, 2)\n+    order.total = round(order.total - order.discount, 2)\n+    return order",
+          "callers": []
+        },
+        {
+          "id": "reserve_stock",
+          "label": "reserve_stock()",
+          "file": "shop/inventory.py",
+          "status": "unchanged"
+        },
+        {
+          "id": "charge",
+          "label": "charge()",
+          "status": "modified",
+          "file": "shop/payments.py",
+          "line": 6,
+          "change": "idempotent on idempotency_key via in-memory _seen",
+          "notes": "_seen is a module-level dict: idempotency does not survive a restart and is not shared across replicas. Fine for a single process, misleading otherwise.",
+          "diff": "@@ -1,5 +1,15 @@\n import gateway\n \n+_seen: dict[str, str] = {}\n \n-def charge(customer_id: str, amount: float) -> str:\n-    return gateway.charge(customer_id, amount)\n+\n+def charge(customer_id: str, amount: float, idempotency_key: str) -> str:\n+    if idempotency_key in _seen:\n+        return _seen[idempotency_key]\n+    charge_id = gateway.charge(customer_id, amount)\n+    _seen[idempotency_key] = charge_id\n+    return charge_id",
+          "callers": []
+        },
+        {
+          "id": "gateway_charge",
+          "label": "gateway.charge()",
+          "status": "unchanged",
+          "file": "external"
+        },
+        {
+          "id": "save_order",
+          "label": "save_order()",
+          "shape": "store",
+          "file": "shop/orders.py",
+          "status": "unchanged",
+          "notes": "Unchanged, but now persists the new discount and charge_id fields because Order is stored whole."
+        }
+      ],
+      "edges": [
+        {
+          "from": "create_order",
+          "to": "validate_order"
+        },
+        {
+          "from": "validate_order",
+          "to": "reserve_stock",
+          "status": "removed"
+        },
+        {
+          "from": "validate_order",
+          "to": "apply_coupon",
+          "status": "added"
+        },
+        {
+          "from": "apply_coupon",
+          "to": "reserve_stock",
+          "status": "added"
+        },
+        {
+          "from": "reserve_stock",
+          "to": "charge",
+          "label": "total, idempotency_key=order.id"
+        },
+        {
+          "from": "charge",
+          "to": "gateway_charge",
+          "label": "first time only"
+        },
+        {
+          "from": "charge",
+          "to": "save_order",
+          "label": "charge_id"
+        }
+      ]
+    },
+    {
+      "id": "cancel-order",
+      "title": "Cancel order",
+      "description": "POST /orders/:id/cancel, called from the account page and by support tooling. Promises released stock and a cancelled status. This PR inserts a refund branch between releasing stock and saving the status.",
+      "nodes": [
+        {
+          "id": "cancel_order",
+          "label": "POST /orders/:id/cancel → cancel_order()",
+          "shape": "entry",
+          "status": "modified",
+          "file": "shop/api.py",
+          "line": 16,
+          "change": "refunds the charge before marking cancelled",
+          "notes": "If refund() raises, stock is already released and the status is never saved: the order stays 'new' with its stock gone. Consider refunding before release_stock or saving status first.",
+          "diff": "@@ -16,6 +19,8 @@ def cancel_order(req):\n def cancel_order(req):\n     order = load_order(req.params[\"id\"])\n     release_stock(order)\n+    if order.charge_id:\n+        refund(order.charge_id)\n     order.status = \"cancelled\"\n     save_order(order)\n     return {\"status\": order.status}",
+          "callers": []
+        },
+        {
+          "id": "load_order",
+          "label": "load_order()",
+          "file": "shop/orders.py",
+          "status": "unchanged",
+          "notes": "Unchanged, but orders saved before this deploy have no charge_id, so cancelling them skips the refund branch. Needs a backfill or a fallback lookup."
+        },
+        {
+          "id": "release_stock",
+          "label": "release_stock()",
+          "file": "shop/inventory.py",
+          "status": "unchanged"
+        },
+        {
+          "id": "has_charge",
+          "label": "charge_id set?",
+          "shape": "decision",
+          "status": "added",
+          "file": "shop/api.py",
+          "line": 19
+        },
+        {
+          "id": "refund",
+          "label": "refund()",
+          "status": "added",
+          "file": "shop/payments.py",
+          "line": 14,
+          "change": "calls gateway.refund(charge_id)",
+          "notes": "No idempotency guard, unlike charge(). A retried cancel refunds twice.",
+          "diff": "@@ -1,5 +1,15 @@\n+def refund(charge_id: str) -> None:\n+    gateway.refund(charge_id)",
+          "callers": []
+        },
+        {
+          "id": "gateway_refund",
+          "label": "gateway.refund()",
+          "status": "unchanged",
+          "file": "external",
+          "notes": "gateway is not in this repo. Confirm refund() exists on it; the diff adds the call without touching the gateway module."
+        },
+        {
+          "id": "save_order",
+          "label": "save_order()",
+          "shape": "store",
+          "file": "shop/orders.py",
+          "status": "unchanged"
+        }
+      ],
+      "edges": [
+        {
+          "from": "cancel_order",
+          "to": "load_order"
+        },
+        {
+          "from": "load_order",
+          "to": "release_stock"
+        },
+        {
+          "from": "release_stock",
+          "to": "save_order",
+          "status": "removed",
+          "label": "status=cancelled"
+        },
+        {
+          "from": "release_stock",
+          "to": "has_charge",
+          "status": "added"
+        },
+        {
+          "from": "has_charge",
+          "to": "refund",
+          "label": "yes",
+          "status": "added"
+        },
+        {
+          "from": "refund",
+          "to": "gateway_refund",
+          "status": "added"
+        },
+        {
+          "from": "refund",
+          "to": "save_order",
+          "label": "status=cancelled",
+          "status": "added"
+        },
+        {
+          "from": "has_charge",
+          "to": "save_order",
+          "label": "no",
+          "status": "added"
+        }
+      ]
+    }
+  ]
+}

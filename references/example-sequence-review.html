@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR #518: confirm payments by webhook</title>
+<style>
+:root{
+  --bg:#f6f8fb;--mask:#fff;--text:#0f172a;--muted:#5b6b82;--faint:#8794a8;--border:#dfe5ee;--arrow:#94a3b8;--accent:#0891b2;
+  --add:#059669;--add-fill:rgba(16,185,129,.12);--mod:#d97706;--mod-fill:rgba(245,158,11,.14);--rem:#e11d48;--rem-fill:rgba(244,63,94,.10);--unc:#64748b;--unc-fill:rgba(100,116,139,.08);
+  --d-add:#e6ffec;--d-add-num:#ccffd8;--d-del:#ffebe9;--d-del-num:#ffd7d5;--d-hunk:#ddf4ff;--d-hunk-fg:#0550ae;--d-num:#8c959f;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+}
+:root[data-theme=dark]{
+  --bg:#22262e;--mask:#2a2f38;--text:#d8dee9;--muted:#a3adbd;--faint:#7f8a9c;--border:#3a414d;--arrow:#7f8a9c;--accent:#88c0d0;
+  --unc:#8f9bb0;--unc-fill:rgba(143,155,176,.10); /* green, amber, red are the same in both themes */
+  --d-add:rgba(163,190,140,.14);--d-add-num:rgba(163,190,140,.26);--d-del:rgba(224,149,157,.14);--d-del-num:rgba(224,149,157,.28);--d-hunk:rgba(136,192,208,.12);--d-hunk-fg:#88c0d0;--d-num:#6f7a8c;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans)}
+button{font:inherit;color:var(--text);background:var(--mask);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--faint)}
+button.on{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.eyebrow{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+h1{margin:4px 0 6px;font-size:22px;font-weight:700;line-height:1.2;letter-spacing:-.02em}
+.summary{margin:0;color:var(--muted);max-width:78ch}
+.other{margin:6px 0 0;padding-left:16px;color:var(--muted)}
+.other:empty{display:none}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,400px);gap:16px;align-items:start}
+@media (max-width:960px){main{grid-template-columns:1fr}}
+.canvas{position:relative;border:1px solid var(--border);border-radius:12px;padding:52px 24px 44px;overflow:auto;min-height:60vh;background:var(--mask)}
+.canvas svg{display:block;max-width:100%;height:auto;margin:0 auto}
+.legend{position:absolute;left:20px;bottom:14px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;border:1.5px solid}
+.sw.added{border-color:var(--add);background:var(--add-fill)}.sw.modified{border-color:var(--mod);background:var(--mod-fill)}
+.sw.removed{border-color:var(--rem);background:var(--rem-fill);border-style:dashed}.sw.unchanged{border-color:var(--unc);background:var(--unc-fill)}
+.tools{position:absolute;right:14px;top:12px;display:flex;gap:6px}
+/* mermaid nodes: status class lands on the node group */
+.node{cursor:pointer}
+.node rect,.node path,.node polygon{stroke-width:1.5px!important;filter:none!important}
+.node.added rect,.node.added path,.node.added polygon{fill:var(--add-fill)!important;stroke:var(--add)!important}
+.node.modified rect,.node.modified path,.node.modified polygon{fill:var(--mod-fill)!important;stroke:var(--mod)!important}
+.node.removed rect,.node.removed path,.node.removed polygon{fill:var(--rem-fill)!important;stroke:var(--rem)!important;stroke-dasharray:6 4}
+.node.unchanged rect,.node.unchanged path,.node.unchanged polygon{fill:var(--unc-fill)!important;stroke:var(--unc)!important}
+.node.sel rect,.node.sel path,.node.sel polygon{stroke-width:2.5px!important}
+.node .nodeLabel{color:var(--text)!important}
+.node .nodeLabel b{font:600 13px var(--mono)}
+.node .nodeLabel small{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:3px}
+.node.removed .nodeLabel b{color:var(--rem)}
+.edgeLabel .label,.edgeLabel p{color:var(--muted)!important;font-size:11px}
+/* ==> is only used for added calls, -.-> only for removed ones */
+.flowchart-link.edge-thickness-thick{stroke:var(--add)!important}
+.flowchart-link.edge-pattern-dotted{stroke:var(--rem)!important}
+.node,.node *{filter:none!important}
+/* sequence flows: status classes are added to actors and message lines after render */
+/* participant boxes stay neutral; the function lines inside carry the status colour */
+rect.actor{fill:var(--unc-fill)!important;stroke:var(--unc)!important;stroke-width:1.5px!important;cursor:pointer;filter:none!important}
+rect.actor.sel{stroke-width:2.5px!important}
+text.actor{pointer-events:none;fill:var(--text)!important}text.actor tspan{font:600 13px var(--mono)}
+.messageText{fill:var(--muted)!important;font-size:11px!important}
+tspan.fn-added{fill:var(--add)!important}tspan.fn-modified{fill:var(--mod)!important}tspan.fn-removed{fill:var(--rem)!important}tspan.fn-unchanged{fill:var(--muted)!important}
+/* wide sequence diagrams scroll sideways instead of shrinking */
+#chart{overflow-x:auto}#chart svg[aria-roledescription=sequence]{max-width:none!important;height:auto}
+.msg-added{stroke:var(--add)!important;stroke-width:2.5px!important}
+.msg-removed{stroke:var(--rem)!important}
+/* side panel */
+aside{display:flex;flex-direction:column;gap:12px;position:sticky;top:20px}
+.card{border:1px solid var(--border);border-radius:12px;background:var(--mask);padding:16px 18px}
+.card h2{display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:15px;font-weight:600}
+.card h2.mono{font-family:var(--mono);font-size:14px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.dot.added{background:var(--add)}.dot.modified{background:var(--mod)}.dot.removed{background:var(--rem)}.dot.unchanged{background:var(--unc)}
+.hint{color:var(--muted);margin:0}
+.pill{font-size:11px;font-weight:600;text-transform:lowercase;padding:1px 8px;border-radius:999px;border:1px solid;margin-left:auto}
+.pill.added{color:var(--add);border-color:var(--add)}.pill.modified{color:var(--mod);border-color:var(--mod)}.pill.removed{color:var(--rem);border-color:var(--rem)}.pill.unchanged{color:var(--unc);border-color:var(--unc)}
+ul.changed{list-style:none;margin:10px 0 0;padding:0}
+ul.changed li{display:grid;grid-template-columns:8px 1fr;gap:0 10px;align-items:baseline;padding:8px 0;border-top:1px solid var(--border);cursor:pointer}
+ul.changed li:hover strong{color:var(--accent)}
+ul.changed strong{font:600 13px var(--mono)}
+ul.changed small{grid-column:2;color:var(--muted)}
+.file{color:var(--faint);font:12px var(--mono);margin:0 0 10px;word-break:break-all}
+.notes{border-left:2px solid var(--mod);padding:6px 12px;margin:12px 0;color:var(--text)}
+.notes p{margin:0}.notes p+p{margin-top:6px}
+.callers{margin:12px 0 0;color:var(--muted)}.callers code{font:12px var(--mono);color:var(--text)}
+.diffwrap{margin:12px 0 0;border:1px solid var(--border);border-radius:8px;overflow:auto;background:var(--mask)}
+table.diff{border-collapse:collapse;font:12px/20px var(--mono);min-width:100%}
+table.diff td{padding:0;vertical-align:top;white-space:pre}
+table.diff td.ln{width:1%;min-width:34px;padding:0 8px;text-align:right;color:var(--d-num);user-select:none}
+table.diff td.sign{width:1%;padding:0 4px 0 8px;color:var(--d-num);user-select:none}
+table.diff td.code{padding-right:16px;width:100%}
+table.diff tr.a td{background:var(--d-add)}table.diff tr.a td.ln{background:var(--d-add-num)}
+table.diff tr.d td{background:var(--d-del)}table.diff tr.d td.ln{background:var(--d-del-num)}
+table.diff tr.h td{background:var(--d-hunk);color:var(--d-hunk-fg);padding:2px 12px}
+pre.err{margin:0;padding:12px;font:12px/1.5 var(--mono);color:var(--rem);white-space:pre-wrap}
+.fn{border-top:1px solid var(--border);margin-top:14px;padding-top:12px}
+.fn h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;font:600 13px var(--mono)}
+.back{display:inline-block;margin-top:12px;color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <div><div class="eyebrow" id="eyebrow"></div><h1 id="title"></h1><p class="summary" id="summary"></p><ul class="other" id="other"></ul></div>
+  <nav id="tabs"></nav>
+</header>
+<main>
+  <section class="canvas" id="canvas">
+    <div class="tools"><button id="theme">Dark</button><button id="copy">Copy Mermaid</button></div>
+    <div id="chart"></div>
+    <div class="legend">
+      <span><i class="sw added"></i>added</span><span><i class="sw modified"></i>modified</span>
+      <span><i class="sw removed"></i>removed</span><span><i class="sw unchanged"></i>unchanged</span>
+      <span>thick = new call · dotted = removed call</span>
+    </div>
+  </section>
+  <aside id="panel"></aside>
+</main>
+<script id="flows" type="application/json">{"title": "PR #518: confirm payments by webhook", "summary": "create_order no longer blocks on the gateway capturing the payment. It creates a payment intent, saves the order as pending and returns 202. A new webhook handler marks the order paid and sends the receipt when the gateway reports success.", "other": ["Order gains intent_id; status gains the value 'pending' (shop/orders.py)", "No test covers the webhook arriving before the order is saved"], "flows": [{"id": "pay-by-webhook", "type": "sequence", "title": "Checkout to paid", "description": "Triggered by the checkout page posting an order. Promises that a successful payment ends with the order marked paid and one receipt sent. Drawn as a sequence because the PR splits one blocking request into two requests from different actors, and correctness now depends on which one reaches the orders table first.", "nodes": [{"id": "page", "label": "Checkout page", "shape": "entry", "notes": "Still treats any 2xx as paid and shows the thank-you screen. With 202 pending it must poll or say 'processing'."}, {"id": "create_order", "label": "Orders API", "functions": [{"status": "modified", "file": "shop/api.py", "line": 12, "change": "returns 202 pending, no longer blocks on capture", "callers": ["scripts/replay_orders.py (expects a paid order back)"], "diff": "@@ -12,9 +12,9 @@ def create_order(req):\n     order = build_order(req)\n-    charge_id = gateway.charge(order.customer_id, order.total)\n-    order.status = \"paid\"\n-    save_order(order)\n-    send_receipt(order)\n-    return 201, order\n+    intent_id = gateway.create_intent(order.customer_id, order.total)\n+    order.status = \"pending\"\n+    order.intent_id = intent_id\n+    save_order(order)\n+    return 202, order", "label": "create_order()"}, {"label": "wait_for_capture()", "status": "removed", "file": "shop/api.py", "line": 30, "change": "polling helper deleted with the blocking charge", "callers": [], "diff": "@@ -30,6 +0,0 @@\n-def wait_for_capture(charge_id, timeout=10):\n-    while timeout > 0:\n-        if gateway.status(charge_id) == \"captured\":\n-            return True\n-        time.sleep(1); timeout -= 1\n-    return False"}], "status": "modified"}, {"id": "gateway", "label": "Payment gateway", "notes": "External. Delivers payment.succeeded at least once, retries only on non-2xx, and can deliver within milliseconds of create_intent returning."}, {"id": "on_payment", "label": "Webhook handler", "functions": [{"status": "added", "file": "shop/webhooks.py", "line": 1, "change": "marks order paid on payment.succeeded, enqueues receipt", "notes": ["Race: the webhook can land before create_order has saved the order. find_by_intent returns None, the handler answers 200, the gateway never retries, and the order stays pending forever. Answer 5xx for an unknown intent, or save the order before calling create_intent.", "No signature check on the webhook body: anyone can mark an order paid.", "Not idempotent: a redelivered event enqueues a second receipt."], "callers": [], "diff": "@@ -0,0 +1,10 @@\n+def on_payment(event):\n+    if event[\"type\"] != \"payment.succeeded\":\n+        return 200\n+    order = find_by_intent(event[\"intent_id\"])\n+    if order is None:\n+        return 200\n+    order.status = \"paid\"\n+    save_order(order)\n+    queue.enqueue(send_receipt, order.id)\n+    return 200", "label": "on_payment()"}, {"label": "find_by_intent()", "status": "added", "file": "shop/orders.py", "line": 41, "change": "looks an order up by its gateway intent id", "callers": [], "notes": "Linear scan over all orders, and intent_id has no index or unique constraint.", "diff": "@@ -40,0 +41,5 @@\n+def find_by_intent(intent_id):\n+    for order in all_orders():\n+        if order.intent_id == intent_id:\n+            return order\n+    return None"}], "status": "added"}, {"id": "db", "label": "orders table", "shape": "store"}, {"id": "send_receipt", "label": "Mail worker", "functions": [{"status": "modified", "file": "shop/mail.py", "line": 4, "change": "takes order_id, runs on the worker queue", "callers": ["admin/resend.py (still passes an Order object)"], "diff": "@@ -4,3 +4,4 @@\n-def send_receipt(order):\n-    mailer.send(order.email, render(order))\n+def send_receipt(order_id):\n+    order = load_order(order_id)\n+    mailer.send(order.email, render(order))", "label": "send_receipt()"}], "status": "modified"}], "edges": [{"from": "page", "to": "create_order", "label": "POST /orders", "status": "unchanged"}, {"from": "create_order", "to": "gateway", "label": "charge(total), wait for capture", "status": "removed"}, {"from": "create_order", "to": "gateway", "label": "create_intent(total)", "status": "added"}, {"from": "gateway", "to": "create_order", "label": "intent_id", "status": "added"}, {"from": "gateway", "to": "on_payment", "label": "payment.succeeded (async, may arrive now)", "status": "added"}, {"from": "on_payment", "to": "db", "label": "find_by_intent(intent_id)", "status": "added"}, {"from": "create_order", "to": "db", "label": "save(status=pending, intent_id)", "status": "unchanged"}, {"from": "create_order", "to": "send_receipt", "label": "send_receipt(order)", "status": "removed"}, {"from": "create_order", "to": "page", "label": "202 pending (was 201 paid)", "status": "added"}, {"from": "on_payment", "to": "db", "label": "save(status=paid)", "status": "added"}, {"from": "on_payment", "to": "send_receipt", "label": "enqueue(order.id)", "status": "added"}], "_mermaid": "sequenceDiagram\n  participant n0 as Checkout page\n  participant n1 as Orders API<br/>~ create_order()<br/>- wait_for_capture()\n  participant n2 as Payment gateway\n  participant n3 as Webhook handler<br/>+ on_payment()<br/>+ find_by_intent()\n  participant n4 as orders table\n  participant n5 as Mail worker<br/>~ send_receipt()\n  n0->>n1: POST /orders\n  n1--xn2: charge(total), wait for capture\n  n1->>n2: create_intent(total)\n  n2->>n1: intent_id\n  n2->>n3: payment.succeeded (async, may arrive now)\n  n3->>n4: find_by_intent(intent_id)\n  n1->>n4: save(status=pending, intent_id)\n  n1--xn5: send_receipt(order)\n  n1->>n0: 202 pending (was 201 paid)\n  n3->>n4: save(status=paid)\n  n3->>n5: enqueue(order.id)", "_ids": {"n0": "page", "n1": "create_order", "n2": "gateway", "n3": "on_payment", "n4": "db", "n5": "send_receipt"}, "_md": "sequenceDiagram\n  participant n0 as Checkout page\n  participant n1 as Orders API<br/>~ create_order()<br/>- wait_for_capture()\n  participant n2 as Payment gateway\n  participant n3 as Webhook handler<br/>+ on_payment()<br/>+ find_by_intent()\n  participant n4 as orders table\n  participant n5 as Mail worker<br/>~ send_receipt()\n  n0->>n1: POST /orders\n  rect rgb(255,228,230)\n    n1--xn2: charge(total), wait for capture\n  end\n  rect rgb(209,250,229)\n    n1->>n2: create_intent(total)\n  end\n  rect rgb(209,250,229)\n    n2->>n1: intent_id\n  end\n  rect rgb(209,250,229)\n    n2->>n3: payment.succeeded (async, may arrive now)\n  end\n  rect rgb(209,250,229)\n    n3->>n4: find_by_intent(intent_id)\n  end\n  n1->>n4: save(status=pending, intent_id)\n  rect rgb(255,228,230)\n    n1--xn5: send_receipt(order)\n  end\n  rect rgb(209,250,229)\n    n1->>n0: 202 pending (was 201 paid)\n  end\n  rect rgb(209,250,229)\n    n3->>n4: save(status=paid)\n  end\n  rect rgb(209,250,229)\n    n3->>n5: enqueue(order.id)\n  end"}]}</script>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.esm.min.mjs";
+const doc = JSON.parse(document.getElementById("flows").textContent);
+const $ = id => document.getElementById(id);
+const h = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const isDark = () => document.documentElement.dataset.theme === "dark"; // light unless toggled
+let cur = 0;
+
+function initMermaid() {
+  mermaid.initialize({ startOnLoad: false, theme: "base", securityLevel: "loose",
+    themeVariables: { fontFamily: css("--sans"), fontSize: "13px", primaryTextColor: css("--text"), textColor: css("--muted"), lineColor: css("--arrow"), edgeLabelBackground: css("--mask"), primaryColor: css("--mask"), primaryBorderColor: css("--border") },
+    sequence: { mirrorActors: false, useMaxWidth: false },
+    flowchart: { htmlLabels: true, curve: "basis", wrappingWidth: 260, padding: 14, nodeSpacing: 40, rankSpacing: 44 } });
+  $("theme").textContent = isDark() ? "Light" : "Dark";
+}
+
+const SIGN = { added: "+ ", modified: "~ ", removed: "- " };
+const changedOf = f => f.nodes.flatMap(n => n.functions || [n]).filter(n => n.status && n.status !== "unchanged");
+const listedOf = f => f.nodes.filter(n => (n.status && n.status !== "unchanged") || n.notes); // noted unchanged nodes too
+$("eyebrow").textContent = `diff review · ${doc.flows.length} flow${doc.flows.length === 1 ? "" : "s"} · ${doc.flows.reduce((a, f) => a + changedOf(f).length, 0)} changed functions`;
+$("title").textContent = doc.title || "Diff flowchart";
+$("summary").textContent = doc.summary || "";
+$("other").innerHTML = (doc.other || []).map(o => `<li>${h(o)}</li>`).join("");
+
+const tabs = $("tabs");
+doc.flows.forEach((f, i) => { const b = document.createElement("button"); b.textContent = f.title; b.onclick = () => show(i); tabs.append(b); });
+if (doc.flows.length < 2) tabs.hidden = true;
+
+async function show(i) {
+  cur = i;
+  [...tabs.children].forEach((b, j) => b.classList.toggle("on", j === i));
+  const f = doc.flows[i];
+  try {
+    const id = `m${i}_${Date.now()}`;
+    const { svg } = await mermaid.render(id, f._mermaid);
+    $("chart").innerHTML = svg;
+    // svg node ids look like <render-id>-flowchart-n3-3; map back to our node
+    $("chart").querySelectorAll(".node").forEach(g => { const m = g.id.match(/-(n\d+)-\d+$/); if (m) { g.dataset.mid = m[1]; g.onclick = () => showNode(f.nodes.find(n => n.id === f._ids[m[1]]), m[1]); } });
+    // sequence: actor rects carry name=<participant id>; message lines come out in edge order
+    $("chart").querySelectorAll("rect.actor[name]").forEach(r => { const mid = r.getAttribute("name"), n = f.nodes.find(n => n.id === f._ids[mid]); if (!n) return; r.dataset.mid = mid; r.classList.add(n.status || "unchanged");
+      r.parentElement.querySelectorAll("text.actor tspan").forEach((t, k) => { if (k && n.functions?.[k - 1]) t.classList.add("fn-" + (n.functions[k - 1].status || "unchanged")); }); // line 0 is the component name
+      r.onclick = () => showNode(n, mid); });
+    $("chart").querySelectorAll(".messageLine0,.messageLine1").forEach((l, j) => l.classList.add("msg-" + (f.edges[j]?.status || "unchanged")));
+  } catch (e) {
+    document.querySelectorAll("body > div[id^=\"dm\"], body > svg").forEach(el => el.remove()); // mermaid's error bomb
+    $("chart").innerHTML = `<pre class="err">${h(e.message || e)}\n\n${h(f._mermaid)}</pre>`;
+  }
+  showOverview(f);
+}
+
+function showOverview(f) {
+  document.querySelectorAll(".sel").forEach(e => e.classList.remove("sel"));
+  $("panel").innerHTML = `<div class="card"><h2><i class="dot"></i>${h(f.title)}</h2><p class="hint">${h(f.description || "")}</p>
+    <ul class="changed">${listedOf(f).map(n => `<li data-id="${h(n.id)}"><i class="dot ${n.status || "unchanged"}"></i><strong>${h(n.label)}</strong><small>${h(n.functions ? n.functions.map(x => (SIGN[x.status] || "") + x.label).join("  ") : n.change || (n.notes ? "unchanged, see note" : n.status))}</small></li>`).join("")}</ul></div>`;
+  $("panel").querySelectorAll("li").forEach(li => li.onclick = () => {
+    const n = f.nodes.find(n => n.id === li.dataset.id);
+    showNode(n, Object.keys(f._ids).find(m => f._ids[m] === n.id));
+  });
+}
+
+// unified diff → github-style table with old/new line numbers
+function renderDiff(text, startLine) {
+  let o = startLine || 1, nw = startLine || 1, rows = "";
+  for (const l of text.split("\n")) {
+    const m = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (m) { o = +m[1]; nw = +m[2]; rows += `<tr class="h"><td colspan="4">${h(l)}</td></tr>`; continue; }
+    const c = l[0], body = l.slice(1);
+    if (c === "+") rows += `<tr class="a"><td class="ln"></td><td class="ln">${nw++}</td><td class="sign">+</td><td class="code">${h(body)}</td></tr>`;
+    else if (c === "-") rows += `<tr class="d"><td class="ln">${o++}</td><td class="ln"></td><td class="sign">-</td><td class="code">${h(body)}</td></tr>`;
+    else if (l !== "") rows += `<tr><td class="ln">${o++}</td><td class="ln">${nw++}</td><td class="sign"></td><td class="code">${h(body)}</td></tr>`;
+  }
+  return `<div class="diffwrap"><table class="diff">${rows}</table></div>`;
+}
+
+const detail = n => { const notes = n.notes ? [].concat(n.notes) : []; return `
+    <p class="file">${h(n.file || "")}${n.line ? ":" + n.line : ""}</p>
+    ${n.change ? `<p class="hint">${h(n.change)}</p>` : ""}
+    ${notes.length ? `<div class="notes">${notes.map(x => `<p>${h(x)}</p>`).join("")}</div>` : ""}
+    ${Array.isArray(n.callers) ? `<p class="callers">${n.callers.length ? "Also called from " + n.callers.map(c => `<code>${h(c)}</code>`).join(", ") : "No callers outside this flow."}</p>` : ""}
+    ${n.diff ? renderDiff(n.diff, n.line) : ""}`; };
+const pill = s => `<span class="pill ${s || "unchanged"}">${s || "unchanged"}</span>`;
+
+function showNode(n, mid) {
+  if (!n) return;
+  document.querySelectorAll(".sel").forEach(e => e.classList.remove("sel"));
+  document.querySelector(`#chart [data-mid="${mid}"]`)?.classList.add("sel");
+  const status = n.status || "unchanged";
+  $("panel").innerHTML = `<div class="card"><h2 class="mono"><i class="dot ${status}"></i>${h(n.label)}${pill(status)}</h2>${detail(n)}
+    ${(n.functions || []).map(x => `<div class="fn"><h3><i class="dot ${x.status || "unchanged"}"></i>${h((SIGN[x.status] || "") + x.label)}${pill(x.status)}</h3>${detail(x)}</div>`).join("")}
+    <a href="#" class="back" id="back">← back to flow</a></div>`;
+  $("back").onclick = e => { e.preventDefault(); showOverview(doc.flows[cur]); };
+}
+
+$("theme").onclick = () => { document.documentElement.dataset.theme = isDark() ? "light" : "dark"; initMermaid(); show(cur); };
+$("copy").onclick = () => navigator.clipboard.writeText(doc.flows[cur]._md).then(() => { $("copy").textContent = "Copied"; setTimeout(() => ($("copy").textContent = "Copy Mermaid"), 1200); });
+initMermaid();
+show(0);
+</script>
+</body>
+</html>

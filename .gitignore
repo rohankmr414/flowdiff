@@ -1,0 +1,6 @@
+__pycache__/
+.DS_Store
+review.html
+review.md
+flows.json
+pr.diff

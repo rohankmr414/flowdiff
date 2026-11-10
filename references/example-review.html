@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PR #412: coupons, idempotent charges, refunds on cancel</title>
+<style>
+:root{
+  --bg:#f6f8fb;--mask:#fff;--text:#0f172a;--muted:#5b6b82;--faint:#8794a8;--border:#dfe5ee;--arrow:#94a3b8;--accent:#0891b2;
+  --add:#059669;--add-fill:rgba(16,185,129,.12);--mod:#d97706;--mod-fill:rgba(245,158,11,.14);--rem:#e11d48;--rem-fill:rgba(244,63,94,.10);--unc:#64748b;--unc-fill:rgba(100,116,139,.08);
+  --d-add:#e6ffec;--d-add-num:#ccffd8;--d-del:#ffebe9;--d-del-num:#ffd7d5;--d-hunk:#ddf4ff;--d-hunk-fg:#0550ae;--d-num:#8c959f;
+  --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --sans:system-ui,-apple-system,"Segoe UI",Inter,sans-serif;
+}
+:root[data-theme=dark]{
+  --bg:#22262e;--mask:#2a2f38;--text:#d8dee9;--muted:#a3adbd;--faint:#7f8a9c;--border:#3a414d;--arrow:#7f8a9c;--accent:#88c0d0;
+  --unc:#8f9bb0;--unc-fill:rgba(143,155,176,.10); /* green, amber, red are the same in both themes */
+  --d-add:rgba(163,190,140,.14);--d-add-num:rgba(163,190,140,.26);--d-del:rgba(224,149,157,.14);--d-del-num:rgba(224,149,157,.28);--d-hunk:rgba(136,192,208,.12);--d-hunk-fg:#88c0d0;--d-num:#6f7a8c;
+}
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:var(--bg);color:var(--text);font:14px/1.55 var(--sans)}
+button{font:inherit;color:var(--text);background:var(--mask);border:1px solid var(--border);border-radius:8px;padding:6px 12px;cursor:pointer}
+button:hover{border-color:var(--faint)}
+button.on{color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 10%,transparent)}
+.eyebrow{font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}
+header{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:16px}
+h1{margin:4px 0 6px;font-size:22px;font-weight:700;line-height:1.2;letter-spacing:-.02em}
+.summary{margin:0;color:var(--muted);max-width:78ch}
+.other{margin:6px 0 0;padding-left:16px;color:var(--muted)}
+.other:empty{display:none}
+nav{display:flex;gap:6px;flex-wrap:wrap;margin-top:2px}
+main{display:grid;grid-template-columns:minmax(0,1fr) minmax(320px,400px);gap:16px;align-items:start}
+@media (max-width:960px){main{grid-template-columns:1fr}}
+.canvas{position:relative;border:1px solid var(--border);border-radius:12px;padding:52px 24px 44px;overflow:auto;min-height:60vh;background:var(--mask)}
+.canvas svg{display:block;max-width:100%;height:auto;margin:0 auto}
+.legend{position:absolute;left:20px;bottom:14px;display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted)}
+.legend span{display:inline-flex;align-items:center;gap:6px}
+.sw{width:12px;height:12px;border-radius:3px;border:1.5px solid}
+.sw.added{border-color:var(--add);background:var(--add-fill)}.sw.modified{border-color:var(--mod);background:var(--mod-fill)}
+.sw.removed{border-color:var(--rem);background:var(--rem-fill);border-style:dashed}.sw.unchanged{border-color:var(--unc);background:var(--unc-fill)}
+.tools{position:absolute;right:14px;top:12px;display:flex;gap:6px}
+/* mermaid nodes: status class lands on the node group */
+.node{cursor:pointer}
+.node rect,.node path,.node polygon{stroke-width:1.5px!important;filter:none!important}
+.node.added rect,.node.added path,.node.added polygon{fill:var(--add-fill)!important;stroke:var(--add)!important}
+.node.modified rect,.node.modified path,.node.modified polygon{fill:var(--mod-fill)!important;stroke:var(--mod)!important}
+.node.removed rect,.node.removed path,.node.removed polygon{fill:var(--rem-fill)!important;stroke:var(--rem)!important;stroke-dasharray:6 4}
+.node.unchanged rect,.node.unchanged path,.node.unchanged polygon{fill:var(--unc-fill)!important;stroke:var(--unc)!important}
+.node.sel rect,.node.sel path,.node.sel polygon{stroke-width:2.5px!important}
+.node .nodeLabel{color:var(--text)!important}
+.node .nodeLabel b{font:600 13px var(--mono)}
+.node .nodeLabel small{display:block;font-size:11px;font-weight:400;color:var(--muted);margin-top:3px}
+.node.removed .nodeLabel b{color:var(--rem)}
+.edgeLabel .label,.edgeLabel p{color:var(--muted)!important;font-size:11px}
+/* ==> is only used for added calls, -.-> only for removed ones */
+.flowchart-link.edge-thickness-thick{stroke:var(--add)!important}
+.flowchart-link.edge-pattern-dotted{stroke:var(--rem)!important}
+.node,.node *{filter:none!important}
+/* sequence flows: status classes are added to actors and message lines after render */
+/* participant boxes stay neutral; the function lines inside carry the status colour */
+rect.actor{fill:var(--unc-fill)!important;stroke:var(--unc)!important;stroke-width:1.5px!important;cursor:pointer;filter:none!important}
+rect.actor.sel{stroke-width:2.5px!important}
+text.actor{pointer-events:none;fill:var(--text)!important}text.actor tspan{font:600 13px var(--mono)}
+.messageText{fill:var(--muted)!important;font-size:11px!important}
+tspan.fn-added{fill:var(--add)!important}tspan.fn-modified{fill:var(--mod)!important}tspan.fn-removed{fill:var(--rem)!important}tspan.fn-unchanged{fill:var(--muted)!important}
+/* wide sequence diagrams scroll sideways instead of shrinking */
+#chart{overflow-x:auto}#chart svg[aria-roledescription=sequence]{max-width:none!important;height:auto}
+.msg-added{stroke:var(--add)!important;stroke-width:2.5px!important}
+.msg-removed{stroke:var(--rem)!important}
+/* side panel */
+aside{display:flex;flex-direction:column;gap:12px;position:sticky;top:20px}
+.card{border:1px solid var(--border);border-radius:12px;background:var(--mask);padding:16px 18px}
+.card h2{display:flex;align-items:center;gap:8px;margin:0 0 6px;font-size:15px;font-weight:600}
+.card h2.mono{font-family:var(--mono);font-size:14px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--accent);flex:none}
+.dot.added{background:var(--add)}.dot.modified{background:var(--mod)}.dot.removed{background:var(--rem)}.dot.unchanged{background:var(--unc)}
+.hint{color:var(--muted);margin:0}
+.pill{font-size:11px;font-weight:600;text-transform:lowercase;padding:1px 8px;border-radius:999px;border:1px solid;margin-left:auto}
+.pill.added{color:var(--add);border-color:var(--add)}.pill.modified{color:var(--mod);border-color:var(--mod)}.pill.removed{color:var(--rem);border-color:var(--rem)}.pill.unchanged{color:var(--unc);border-color:var(--unc)}
+ul.changed{list-style:none;margin:10px 0 0;padding:0}
+ul.changed li{display:grid;grid-template-columns:8px 1fr;gap:0 10px;align-items:baseline;padding:8px 0;border-top:1px solid var(--border);cursor:pointer}
+ul.changed li:hover strong{color:var(--accent)}
+ul.changed strong{font:600 13px var(--mono)}
+ul.changed small{grid-column:2;color:var(--muted)}
+.file{color:var(--faint);font:12px var(--mono);margin:0 0 10px;word-break:break-all}
+.notes{border-left:2px solid var(--mod);padding:6px 12px;margin:12px 0;color:var(--text)}
+.notes p{margin:0}.notes p+p{margin-top:6px}
+.callers{margin:12px 0 0;color:var(--muted)}.callers code{font:12px var(--mono);color:var(--text)}
+.diffwrap{margin:12px 0 0;border:1px solid var(--border);border-radius:8px;overflow:auto;background:var(--mask)}
+table.diff{border-collapse:collapse;font:12px/20px var(--mono);min-width:100%}
+table.diff td{padding:0;vertical-align:top;white-space:pre}
+table.diff td.ln{width:1%;min-width:34px;padding:0 8px;text-align:right;color:var(--d-num);user-select:none}
+table.diff td.sign{width:1%;padding:0 4px 0 8px;color:var(--d-num);user-select:none}
+table.diff td.code{padding-right:16px;width:100%}
+table.diff tr.a td{background:var(--d-add)}table.diff tr.a td.ln{background:var(--d-add-num)}
+table.diff tr.d td{background:var(--d-del)}table.diff tr.d td.ln{background:var(--d-del-num)}
+table.diff tr.h td{background:var(--d-hunk);color:var(--d-hunk-fg);padding:2px 12px}
+pre.err{margin:0;padding:12px;font:12px/1.5 var(--mono);color:var(--rem);white-space:pre-wrap}
+.fn{border-top:1px solid var(--border);margin-top:14px;padding-top:12px}
+.fn h3{display:flex;align-items:center;gap:8px;margin:0 0 6px;font:600 13px var(--mono)}
+.back{display:inline-block;margin-top:12px;color:var(--accent);text-decoration:none}
+</style>
+</head>
+<body>
+<header>
+  <div><div class="eyebrow" id="eyebrow"></div><h1 id="title"></h1><p class="summary" id="summary"></p><ul class="other" id="other"></ul></div>
+  <nav id="tabs"></nav>
+</header>
+<main>
+  <section class="canvas" id="canvas">
+    <div class="tools"><button id="theme">Dark</button><button id="copy">Copy Mermaid</button></div>
+    <div id="chart"></div>
+    <div class="legend">
+      <span><i class="sw added"></i>added</span><span><i class="sw modified"></i>modified</span>
+      <span><i class="sw removed"></i>removed</span><span><i class="sw unchanged"></i>unchanged</span>
+      <span>thick = new call · dotted = removed call</span>
+    </div>
+  </section>
+  <aside id="panel"></aside>
+</main>
+<script id="flows" type="application/json">{"title": "PR #412: coupons, idempotent charges, refunds on cancel", "summary": "Adds coupon discounts to order creation, makes charge() idempotent on order id, and refunds the charge when an order is cancelled. Two request flows change: create order and cancel order.", "other": ["Order dataclass gains discount and charge_id fields (shop/orders.py)", "No tests added for apply_coupon, charge idempotency, or refund"], "flows": [{"id": "create-order", "title": "Create order", "description": "POST /orders, called by the checkout page. Promises a saved order that is paid for and has its stock reserved. This PR inserts a coupon step before stock reservation and makes the charge idempotent on the order id.", "nodes": [{"id": "create_order", "label": "POST /orders \u2192 create_order()", "shape": "entry", "status": "modified", "file": "shop/api.py", "line": 7, "change": "applies coupon, stores charge_id, returns discount", "notes": "InvalidCoupon is not caught here or in any middleware shown in the diff, so a bad coupon code becomes a 500 rather than a 400.", "diff": "@@ -7,9 +8,10 @@ def create_order(req):\n def create_order(req):\n     order = validate_order(req.json)\n+    order = apply_coupon(order, req.json.get(\"coupon\"))\n     reserve_stock(order)\n-    charge(order.customer_id, order.total)\n+    order.charge_id = charge(order.customer_id, order.total, idempotency_key=order.id)\n     save_order(order)\n-    return {\"id\": order.id, \"total\": order.total}\n+    return {\"id\": order.id, \"total\": order.total, \"discount\": order.discount}", "callers": []}, {"id": "validate_order", "label": "validate_order()", "file": "shop/orders.py", "status": "unchanged"}, {"id": "apply_coupon", "label": "apply_coupon()", "status": "added", "file": "shop/pricing.py", "line": 8, "change": "discounts total by coupon rate, raises InvalidCoupon", "notes": ["Lookup is case-insensitive via upper(); COUPONS has no expiry or usage cap.", "Mutates order.total in place, so everything downstream (stock, charge, response) sees the discounted total. Intended, but worth confirming."], "diff": "@@ -0,0 +1,16 @@\n+COUPONS = {\"WELCOME10\": 0.10, \"VIP25\": 0.25}\n+\n+\n+class InvalidCoupon(Exception):\n+    pass\n+\n+\n+def apply_coupon(order, code: str | None):\n+    if not code:\n+        return order\n+    rate = COUPONS.get(code.upper())\n+    if rate is None:\n+        raise InvalidCoupon(code)\n+    order.discount = round(order.total * rate, 2)\n+    order.total = round(order.total - order.discount, 2)\n+    return order", "callers": []}, {"id": "reserve_stock", "label": "reserve_stock()", "file": "shop/inventory.py", "status": "unchanged"}, {"id": "charge", "label": "charge()", "status": "modified", "file": "shop/payments.py", "line": 6, "change": "idempotent on idempotency_key via in-memory _seen", "notes": "_seen is a module-level dict: idempotency does not survive a restart and is not shared across replicas. Fine for a single process, misleading otherwise.", "diff": "@@ -1,5 +1,15 @@\n import gateway\n \n+_seen: dict[str, str] = {}\n \n-def charge(customer_id: str, amount: float) -> str:\n-    return gateway.charge(customer_id, amount)\n+\n+def charge(customer_id: str, amount: float, idempotency_key: str) -> str:\n+    if idempotency_key in _seen:\n+        return _seen[idempotency_key]\n+    charge_id = gateway.charge(customer_id, amount)\n+    _seen[idempotency_key] = charge_id\n+    return charge_id", "callers": []}, {"id": "gateway_charge", "label": "gateway.charge()", "status": "unchanged", "file": "external"}, {"id": "save_order", "label": "save_order()", "shape": "store", "file": "shop/orders.py", "status": "unchanged", "notes": "Unchanged, but now persists the new discount and charge_id fields because Order is stored whole."}], "edges": [{"from": "create_order", "to": "validate_order"}, {"from": "validate_order", "to": "reserve_stock", "status": "removed"}, {"from": "validate_order", "to": "apply_coupon", "status": "added"}, {"from": "apply_coupon", "to": "reserve_stock", "status": "added"}, {"from": "reserve_stock", "to": "charge", "label": "total, idempotency_key=order.id"}, {"from": "charge", "to": "gateway_charge", "label": "first time only"}, {"from": "charge", "to": "save_order", "label": "charge_id"}], "_mermaid": "flowchart TD\n  n0([\"<b>POST /orders \u2192 create_order()<\/b><br/><small>applies coupon, stores charge_id, returns discount<\/small>\"]):::modified\n  n1[\"<b>validate_order()<\/b>\"]:::unchanged\n  n2[\"<b>apply_coupon()<\/b><br/><small>discounts total by coupon rate, raises InvalidCoupon<\/small>\"]:::added\n  n3[\"<b>reserve_stock()<\/b>\"]:::unchanged\n  n4[\"<b>charge()<\/b><br/><small>idempotent on idempotency_key via in-memory _seen<\/small>\"]:::modified\n  n5[\"<b>gateway.charge()<\/b>\"]:::unchanged\n  n6[(\"<b>save_order()<\/b>\")]:::unchanged\n  n0 --> n1\n  n1 -.-> n3\n  n1 ==> n2\n  n2 ==> n3\n  n3 -- \"total, idempotency_key=order.id\" --> n4\n  n4 -- \"first time only\" --> n5\n  n4 -- \"charge_id\" --> n6", "_ids": {"n0": "create_order", "n1": "validate_order", "n2": "apply_coupon", "n3": "reserve_stock", "n4": "charge", "n5": "gateway_charge", "n6": "save_order"}, "_md": "flowchart TD\n  n0([\"POST /orders \u2192 create_order()<br/>applies coupon, stores charge_id, returns discount\"]):::modified\n  n1[\"validate_order()\"]:::unchanged\n  n2[\"apply_coupon()<br/>discounts total by coupon rate, raises InvalidCoupon\"]:::added\n  n3[\"reserve_stock()\"]:::unchanged\n  n4[\"charge()<br/>idempotent on idempotency_key via in-memory _seen\"]:::modified\n  n5[\"gateway.charge()\"]:::unchanged\n  n6[(\"save_order()\")]:::unchanged\n  n0 --> n1\n  n1 -.-> n3\n  n1 ==> n2\n  n2 ==> n3\n  n3 -- \"total, idempotency_key=order.id\" --> n4\n  n4 -- \"first time only\" --> n5\n  n4 -- \"charge_id\" --> n6\n  linkStyle 1 stroke:#e11d48,stroke-width:2px\n  linkStyle 2 stroke:#059669,stroke-width:2px\n  linkStyle 3 stroke:#059669,stroke-width:2px\n  classDef added fill:#d1fae5,stroke:#059669,color:#064e3b\n  classDef modified fill:#fef3c7,stroke:#d97706,color:#78350f\n  classDef removed fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-dasharray:6 4\n  classDef unchanged fill:#f1f5f9,stroke:#64748b,color:#334155"}, {"id": "cancel-order", "title": "Cancel order", "description": "POST /orders/:id/cancel, called from the account page and by support tooling. Promises released stock and a cancelled status. This PR inserts a refund branch between releasing stock and saving the status.", "nodes": [{"id": "cancel_order", "label": "POST /orders/:id/cancel \u2192 cancel_order()", "shape": "entry", "status": "modified", "file": "shop/api.py", "line": 16, "change": "refunds the charge before marking cancelled", "notes": "If refund() raises, stock is already released and the status is never saved: the order stays 'new' with its stock gone. Consider refunding before release_stock or saving status first.", "diff": "@@ -16,6 +19,8 @@ def cancel_order(req):\n def cancel_order(req):\n     order = load_order(req.params[\"id\"])\n     release_stock(order)\n+    if order.charge_id:\n+        refund(order.charge_id)\n     order.status = \"cancelled\"\n     save_order(order)\n     return {\"status\": order.status}", "callers": []}, {"id": "load_order", "label": "load_order()", "file": "shop/orders.py", "status": "unchanged", "notes": "Unchanged, but orders saved before this deploy have no charge_id, so cancelling them skips the refund branch. Needs a backfill or a fallback lookup."}, {"id": "release_stock", "label": "release_stock()", "file": "shop/inventory.py", "status": "unchanged"}, {"id": "has_charge", "label": "charge_id set?", "shape": "decision", "status": "added", "file": "shop/api.py", "line": 19}, {"id": "refund", "label": "refund()", "status": "added", "file": "shop/payments.py", "line": 14, "change": "calls gateway.refund(charge_id)", "notes": "No idempotency guard, unlike charge(). A retried cancel refunds twice.", "diff": "@@ -1,5 +1,15 @@\n+def refund(charge_id: str) -> None:\n+    gateway.refund(charge_id)", "callers": []}, {"id": "gateway_refund", "label": "gateway.refund()", "status": "unchanged", "file": "external", "notes": "gateway is not in this repo. Confirm refund() exists on it; the diff adds the call without touching the gateway module."}, {"id": "save_order", "label": "save_order()", "shape": "store", "file": "shop/orders.py", "status": "unchanged"}], "edges": [{"from": "cancel_order", "to": "load_order"}, {"from": "load_order", "to": "release_stock"}, {"from": "release_stock", "to": "save_order", "status": "removed", "label": "status=cancelled"}, {"from": "release_stock", "to": "has_charge", "status": "added"}, {"from": "has_charge", "to": "refund", "label": "yes", "status": "added"}, {"from": "refund", "to": "gateway_refund", "status": "added"}, {"from": "refund", "to": "save_order", "label": "status=cancelled", "status": "added"}, {"from": "has_charge", "to": "save_order", "label": "no", "status": "added"}], "_mermaid": "flowchart TD\n  n0([\"<b>POST /orders/:id/cancel \u2192 cancel_order()<\/b><br/><small>refunds the charge before marking cancelled<\/small>\"]):::modified\n  n1[\"<b>load_order()<\/b>\"]:::unchanged\n  n2[\"<b>release_stock()<\/b>\"]:::unchanged\n  n3{\"<b>charge_id set?<\/b>\"}:::added\n  n4[\"<b>refund()<\/b><br/><small>calls gateway.refund(charge_id)<\/small>\"]:::added\n  n5[\"<b>gateway.refund()<\/b>\"]:::unchanged\n  n6[(\"<b>save_order()<\/b>\")]:::unchanged\n  n0 --> n1\n  n1 --> n2\n  n2 -. \"status=cancelled\" .-> n6\n  n2 ==> n3\n  n3 == \"yes\" ==> n4\n  n4 ==> n5\n  n4 == \"status=cancelled\" ==> n6\n  n3 == \"no\" ==> n6", "_ids": {"n0": "cancel_order", "n1": "load_order", "n2": "release_stock", "n3": "has_charge", "n4": "refund", "n5": "gateway_refund", "n6": "save_order"}, "_md": "flowchart TD\n  n0([\"POST /orders/:id/cancel \u2192 cancel_order()<br/>refunds the charge before marking cancelled\"]):::modified\n  n1[\"load_order()\"]:::unchanged\n  n2[\"release_stock()\"]:::unchanged\n  n3{\"charge_id set?\"}:::added\n  n4[\"refund()<br/>calls gateway.refund(charge_id)\"]:::added\n  n5[\"gateway.refund()\"]:::unchanged\n  n6[(\"save_order()\")]:::unchanged\n  n0 --> n1\n  n1 --> n2\n  n2 -. \"status=cancelled\" .-> n6\n  n2 ==> n3\n  n3 == \"yes\" ==> n4\n  n4 ==> n5\n  n4 == \"status=cancelled\" ==> n6\n  n3 == \"no\" ==> n6\n  linkStyle 2 stroke:#e11d48,stroke-width:2px\n  linkStyle 3 stroke:#059669,stroke-width:2px\n  linkStyle 4 stroke:#059669,stroke-width:2px\n  linkStyle 5 stroke:#059669,stroke-width:2px\n  linkStyle 6 stroke:#059669,stroke-width:2px\n  linkStyle 7 stroke:#059669,stroke-width:2px\n  classDef added fill:#d1fae5,stroke:#059669,color:#064e3b\n  classDef modified fill:#fef3c7,stroke:#d97706,color:#78350f\n  classDef removed fill:#ffe4e6,stroke:#e11d48,color:#881337,stroke-dasharray:6 4\n  classDef unchanged fill:#f1f5f9,stroke:#64748b,color:#334155"}]}</script>
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@12.3.0/dist/mermaid.esm.min.mjs";
+const doc = JSON.parse(document.getElementById("flows").textContent);
+const $ = id => document.getElementById(id);
+const h = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const isDark = () => document.documentElement.dataset.theme === "dark"; // light unless toggled
+let cur = 0;
+
+function initMermaid() {
+  mermaid.initialize({ startOnLoad: false, theme: "base", securityLevel: "loose",
+    themeVariables: { fontFamily: css("--sans"), fontSize: "13px", primaryTextColor: css("--text"), textColor: css("--muted"), lineColor: css("--arrow"), edgeLabelBackground: css("--mask"), primaryColor: css("--mask"), primaryBorderColor: css("--border") },
+    sequence: { mirrorActors: false, useMaxWidth: false },
+    flowchart: { htmlLabels: true, curve: "basis", wrappingWidth: 260, padding: 14, nodeSpacing: 40, rankSpacing: 44 } });
+  $("theme").textContent = isDark() ? "Light" : "Dark";
+}
+
+const SIGN = { added: "+ ", modified: "~ ", removed: "- " };
+const changedOf = f => f.nodes.flatMap(n => n.functions || [n]).filter(n => n.status && n.status !== "unchanged");
+const listedOf = f => f.nodes.filter(n => (n.status && n.status !== "unchanged") || n.notes); // noted unchanged nodes too
+$("eyebrow").textContent = `diff review · ${doc.flows.length} flow${doc.flows.length === 1 ? "" : "s"} · ${doc.flows.reduce((a, f) => a + changedOf(f).length, 0)} changed functions`;
+$("title").textContent = doc.title || "Diff flowchart";
+$("summary").textContent = doc.summary || "";
+$("other").innerHTML = (doc.other || []).map(o => `<li>${h(o)}</li>`).join("");
+
+const tabs = $("tabs");
+doc.flows.forEach((f, i) => { const b = document.createElement("button"); b.textContent = f.title; b.onclick = () => show(i); tabs.append(b); });
+if (doc.flows.length < 2) tabs.hidden = true;
+
+async function show(i) {
+  cur = i;
+  [...tabs.children].forEach((b, j) => b.classList.toggle("on", j === i));
+  const f = doc.flows[i];
+  try {
+    const id = `m${i}_${Date.now()}`;
+    const { svg } = await mermaid.render(id, f._mermaid);
+    $("chart").innerHTML = svg;
+    // svg node ids look like <render-id>-flowchart-n3-3; map back to our node
+    $("chart").querySelectorAll(".node").forEach(g => { const m = g.id.match(/-(n\d+)-\d+$/); if (m) { g.dataset.mid = m[1]; g.onclick = () => showNode(f.nodes.find(n => n.id === f._ids[m[1]]), m[1]); } });
+    // sequence: actor rects carry name=<participant id>; message lines come out in edge order
+    $("chart").querySelectorAll("rect.actor[name]").forEach(r => { const mid = r.getAttribute("name"), n = f.nodes.find(n => n.id === f._ids[mid]); if (!n) return; r.dataset.mid = mid; r.classList.add(n.status || "unchanged");
+      r.parentElement.querySelectorAll("text.actor tspan").forEach((t, k) => { if (k && n.functions?.[k - 1]) t.classList.add("fn-" + (n.functions[k - 1].status || "unchanged")); }); // line 0 is the component name
+      r.onclick = () => showNode(n, mid); });
+    $("chart").querySelectorAll(".messageLine0,.messageLine1").forEach((l, j) => l.classList.add("msg-" + (f.edges[j]?.status || "unchanged")));
+  } catch (e) {
+    document.querySelectorAll("body > div[id^=\"dm\"], body > svg").forEach(el => el.remove()); // mermaid's error bomb
+    $("chart").innerHTML = `<pre class="err">${h(e.message || e)}\n\n${h(f._mermaid)}</pre>`;
+  }
+  showOverview(f);
+}
+
+function showOverview(f) {
+  document.querySelectorAll(".sel").forEach(e => e.classList.remove("sel"));
+  $("panel").innerHTML = `<div class="card"><h2><i class="dot"></i>${h(f.title)}</h2><p class="hint">${h(f.description || "")}</p>
+    <ul class="changed">${listedOf(f).map(n => `<li data-id="${h(n.id)}"><i class="dot ${n.status || "unchanged"}"></i><strong>${h(n.label)}</strong><small>${h(n.functions ? n.functions.map(x => (SIGN[x.status] || "") + x.label).join("  ") : n.change || (n.notes ? "unchanged, see note" : n.status))}</small></li>`).join("")}</ul></div>`;
+  $("panel").querySelectorAll("li").forEach(li => li.onclick = () => {
+    const n = f.nodes.find(n => n.id === li.dataset.id);
+    showNode(n, Object.keys(f._ids).find(m => f._ids[m] === n.id));
+  });
+}
+
+// unified diff → github-style table with old/new line numbers
+function renderDiff(text, startLine) {
+  let o = startLine || 1, nw = startLine || 1, rows = "";
+  for (const l of text.split("\n")) {
+    const m = l.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (m) { o = +m[1]; nw = +m[2]; rows += `<tr class="h"><td colspan="4">${h(l)}</td></tr>`; continue; }
+    const c = l[0], body = l.slice(1);
+    if (c === "+") rows += `<tr class="a"><td class="ln"></td><td class="ln">${nw++}</td><td class="sign">+</td><td class="code">${h(body)}</td></tr>`;
+    else if (c === "-") rows += `<tr class="d"><td class="ln">${o++}</td><td class="ln"></td><td class="sign">-</td><td class="code">${h(body)}</td></tr>`;
+    else if (l !== "") rows += `<tr><td class="ln">${o++}</td><td class="ln">${nw++}</td><td class="sign"></td><td class="code">${h(body)}</td></tr>`;
+  }
+  return `<div class="diffwrap"><table class="diff">${rows}</table></div>`;
+}
+
+const detail = n => { const notes = n.notes ? [].concat(n.notes) : []; return `
+    <p class="file">${h(n.file || "")}${n.line ? ":" + n.line : ""}</p>
+    ${n.change ? `<p class="hint">${h(n.change)}</p>` : ""}
+    ${notes.length ? `<div class="notes">${notes.map(x => `<p>${h(x)}</p>`).join("")}</div>` : ""}
+    ${Array.isArray(n.callers) ? `<p class="callers">${n.callers.length ? "Also called from " + n.callers.map(c => `<code>${h(c)}</code>`).join(", ") : "No callers outside this flow."}</p>` : ""}
+    ${n.diff ? renderDiff(n.diff, n.line) : ""}`; };
+const pill = s => `<span class="pill ${s || "unchanged"}">${s || "unchanged"}</span>`;
+
+function showNode(n, mid) {
+  if (!n) return;
+  document.querySelectorAll(".sel").forEach(e => e.classList.remove("sel"));
+  document.querySelector(`#chart [data-mid="${mid}"]`)?.classList.add("sel");
+  const status = n.status || "unchanged";
+  $("panel").innerHTML = `<div class="card"><h2 class="mono"><i class="dot ${status}"></i>${h(n.label)}${pill(status)}</h2>${detail(n)}
+    ${(n.functions || []).map(x => `<div class="fn"><h3><i class="dot ${x.status || "unchanged"}"></i>${h((SIGN[x.status] || "") + x.label)}${pill(x.status)}</h3>${detail(x)}</div>`).join("")}
+    <a href="#" class="back" id="back">← back to flow</a></div>`;
+  $("back").onclick = e => { e.preventDefault(); showOverview(doc.flows[cur]); };
+}
+
+$("theme").onclick = () => { document.documentElement.dataset.theme = isDark() ? "light" : "dark"; initMermaid(); show(cur); };
+$("copy").onclick = () => navigator.clipboard.writeText(doc.flows[cur]._md).then(() => { $("copy").textContent = "Copied"; setTimeout(() => ($("copy").textContent = "Copy Mermaid"), 1200); });
+initMermaid();
+show(0);
+</script>
+</body>
+</html>

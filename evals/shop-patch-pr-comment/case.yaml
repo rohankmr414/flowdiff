@@ -1,0 +1,9 @@
+schema_version: "1.1"
+name: shop-patch-pr-comment
+expected_outcome: |
+  A markdown document with one Mermaid flowchart block per flow (create order, cancel order) that
+  GitHub will render: nodes for the functions in each flow, added/modified/removed distinguished by
+  class or style, and a short bulleted list under each diagram naming the changed functions with a
+  one-line behavioural summary. At least one risk is called out. No HTML file is required.
+context:
+  scaffold_script: place-files.sh

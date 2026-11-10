@@ -1,0 +1,12 @@
+schema_version: "1.1"
+name: shop-patch-two-flows
+expected_outcome: |
+  An HTML page (or equivalent rendered flowchart) with two separate flows, create order and cancel order.
+  Create order shows apply_coupon as added, charge and create_order as modified, with validate_order,
+  reserve_stock and save_order as unchanged context. Cancel order shows refund as added, cancel_order as
+  modified, and a new branch on charge_id. Each changed node carries the real hunk from shop.patch and a
+  short behavioural summary. Reviewer notes call out at least one real risk, such as refund failing after
+  stock is released, or InvalidCoupon not being caught. The Order dataclass field additions are listed
+  outside the flows rather than drawn as a node. The reply is a few lines per flow plus the file path.
+context:
+  scaffold_script: place-files.sh

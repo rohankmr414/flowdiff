@@ -1,0 +1,88 @@
+diff --git a/shop/api.py b/shop/api.py
+index 8e55a2e..e62de2f 100644
+--- a/shop/api.py
++++ b/shop/api.py
+@@ -1,19 +1,23 @@
+ from inventory import release_stock, reserve_stock
+ from orders import load_order, save_order, validate_order
+-from payments import charge
++from payments import charge, refund
++from pricing import apply_coupon
+ 
+ 
+ def create_order(req):
+     order = validate_order(req.json)
++    order = apply_coupon(order, req.json.get("coupon"))
+     reserve_stock(order)
+-    charge(order.customer_id, order.total)
++    order.charge_id = charge(order.customer_id, order.total, idempotency_key=order.id)
+     save_order(order)
+-    return {"id": order.id, "total": order.total}
++    return {"id": order.id, "total": order.total, "discount": order.discount}
+ 
+ 
+ def cancel_order(req):
+     order = load_order(req.params["id"])
+     release_stock(order)
++    if order.charge_id:
++        refund(order.charge_id)
+     order.status = "cancelled"
+     save_order(order)
+     return {"status": order.status}
+diff --git a/shop/orders.py b/shop/orders.py
+index b9edb72..5a7c619 100644
+--- a/shop/orders.py
++++ b/shop/orders.py
+@@ -10,6 +10,8 @@ class Order:
+     items: list[dict]
+     total: float
+     status: str = "new"
++    discount: float = 0.0
++    charge_id: str | None = None
+ 
+ 
+ def validate_order(payload: dict) -> Order:
+diff --git a/shop/payments.py b/shop/payments.py
+index 4271b47..ceb25a5 100644
+--- a/shop/payments.py
++++ b/shop/payments.py
+@@ -1,5 +1,15 @@
+ import gateway
+ 
++_seen: dict[str, str] = {}
+ 
+-def charge(customer_id: str, amount: float) -> str:
+-    return gateway.charge(customer_id, amount)
++
++def charge(customer_id: str, amount: float, idempotency_key: str) -> str:
++    if idempotency_key in _seen:
++        return _seen[idempotency_key]
++    charge_id = gateway.charge(customer_id, amount)
++    _seen[idempotency_key] = charge_id
++    return charge_id
++
++
++def refund(charge_id: str) -> None:
++    gateway.refund(charge_id)
+diff --git a/shop/pricing.py b/shop/pricing.py
+new file mode 100644
+index 0000000..faaebb5
+--- /dev/null
++++ b/shop/pricing.py
+@@ -0,0 +1,16 @@
++COUPONS = {"WELCOME10": 0.10, "VIP25": 0.25}
++
++
++class InvalidCoupon(Exception):
++    pass
++
++
++def apply_coupon(order, code: str | None):
++    if not code:
++        return order
++    rate = COUPONS.get(code.upper())
++    if rate is None:
++        raise InvalidCoupon(code)
++    order.discount = round(order.total * rate, 2)
++    order.total = round(order.total - order.discount, 2)
++    return order

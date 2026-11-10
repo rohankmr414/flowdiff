@@ -1,0 +1,13 @@
+schema_version: "1.1"
+name: signup-patch-picks-sequence
+expected_outcome: |
+  The signup flow is drawn as a sequence diagram, because the patch splits one request into work done by
+  separate components: the API, the queue, a new worker process, the users store and the mail provider.
+  Participants are those components, not one box per function. Changed functions are listed inside their
+  component with a status: register modified, get_user added, handle_welcome and run added, render_welcome
+  moved from the API to the worker. The old inline send from the API to the mail provider is shown as
+  removed. Reviewer notes flag that the job is enqueued before db.commit(), so the worker can find no user
+  and silently drop the job; that the email is lost after three failed attempts because the job is still
+  acked; and that admin/invite.py still imports render_welcome from api.signup, which no longer exists.
+context:
+  scaffold_script: place-files.sh

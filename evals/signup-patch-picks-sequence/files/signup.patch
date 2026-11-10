@@ -1,0 +1,74 @@
+diff --git a/signup/api/db.py b/signup/api/db.py
+index 25d9b42..3922d9c 100644
+--- a/signup/api/db.py
++++ b/signup/api/db.py
+@@ -15,3 +15,7 @@ def insert_user(email, name):
+ def commit():
+     _users.update(_pending)
+     _pending.clear()
++
++
++def get_user(user_id):
++    return _users.get(user_id)
+diff --git a/signup/api/signup.py b/signup/api/signup.py
+index 351db27..9073b39 100644
+--- a/signup/api/signup.py
++++ b/signup/api/signup.py
+@@ -1,5 +1,5 @@
+ from api import db
+-from lib import mailer
++from lib import queue
+ 
+ 
+ def register(email, name):
+@@ -7,10 +7,6 @@ def register(email, name):
+     if db.find_user(email):
+         return 409, {"error": "exists"}
+     user = db.insert_user(email, name)
++    queue.enqueue("welcome_email", {"user_id": user["id"]})
+     db.commit()
+-    mailer.send(user["email"], "Welcome", render_welcome(user))
+     return 201, {"id": user["id"]}
+-
+-
+-def render_welcome(user):
+-    return f"Hi {user['name']}, welcome aboard!"
+diff --git a/signup/worker/email_worker.py b/signup/worker/email_worker.py
+new file mode 100644
+index 0000000..b9f1b07
+--- /dev/null
++++ b/signup/worker/email_worker.py
+@@ -0,0 +1,33 @@
++"""Separate process: `python -m worker.email_worker`."""
++import time
++
++from api import db
++from lib import mailer, queue
++
++MAX_ATTEMPTS = 3
++
++
++def render_welcome(user):
++    return f"Hi {user['name']}, welcome aboard!"
++
++
++def handle_welcome(job):
++    user = db.get_user(job["user_id"])
++    if user is None:
++        return
++    for attempt in range(MAX_ATTEMPTS):
++        try:
++            mailer.send(user["email"], "Welcome", render_welcome(user))
++            return
++        except mailer.SendError:
++            time.sleep(2 ** attempt)
++
++
++def run():
++    for job in queue.consume("welcome_email"):
++        handle_welcome(job)
++        queue.ack(job)
++
++
++if __name__ == "__main__":
++    run()

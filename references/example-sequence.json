@@ -1,0 +1,176 @@
+{
+  "title": "PR #518: confirm payments by webhook",
+  "summary": "create_order no longer blocks on the gateway capturing the payment. It creates a payment intent, saves the order as pending and returns 202. A new webhook handler marks the order paid and sends the receipt when the gateway reports success.",
+  "other": [
+    "Order gains intent_id; status gains the value 'pending' (shop/orders.py)",
+    "No test covers the webhook arriving before the order is saved"
+  ],
+  "flows": [
+    {
+      "id": "pay-by-webhook",
+      "type": "sequence",
+      "title": "Checkout to paid",
+      "description": "Triggered by the checkout page posting an order. Promises that a successful payment ends with the order marked paid and one receipt sent. Drawn as a sequence because the PR splits one blocking request into two requests from different actors, and correctness now depends on which one reaches the orders table first.",
+      "nodes": [
+        {
+          "id": "page",
+          "label": "Checkout page",
+          "shape": "entry",
+          "notes": "Still treats any 2xx as paid and shows the thank-you screen. With 202 pending it must poll or say 'processing'."
+        },
+        {
+          "id": "create_order",
+          "label": "Orders API",
+          "functions": [
+            {
+              "status": "modified",
+              "file": "shop/api.py",
+              "line": 12,
+              "change": "returns 202 pending, no longer blocks on capture",
+              "callers": [
+                "scripts/replay_orders.py (expects a paid order back)"
+              ],
+              "diff": "@@ -12,9 +12,9 @@ def create_order(req):\n     order = build_order(req)\n-    charge_id = gateway.charge(order.customer_id, order.total)\n-    order.status = \"paid\"\n-    save_order(order)\n-    send_receipt(order)\n-    return 201, order\n+    intent_id = gateway.create_intent(order.customer_id, order.total)\n+    order.status = \"pending\"\n+    order.intent_id = intent_id\n+    save_order(order)\n+    return 202, order",
+              "label": "create_order()"
+            },
+            {
+              "label": "wait_for_capture()",
+              "status": "removed",
+              "file": "shop/api.py",
+              "line": 30,
+              "change": "polling helper deleted with the blocking charge",
+              "callers": [],
+              "diff": "@@ -30,6 +0,0 @@\n-def wait_for_capture(charge_id, timeout=10):\n-    while timeout > 0:\n-        if gateway.status(charge_id) == \"captured\":\n-            return True\n-        time.sleep(1); timeout -= 1\n-    return False"
+            }
+          ]
+        },
+        {
+          "id": "gateway",
+          "label": "Payment gateway",
+          "notes": "External. Delivers payment.succeeded at least once, retries only on non-2xx, and can deliver within milliseconds of create_intent returning."
+        },
+        {
+          "id": "on_payment",
+          "label": "Webhook handler",
+          "functions": [
+            {
+              "status": "added",
+              "file": "shop/webhooks.py",
+              "line": 1,
+              "change": "marks order paid on payment.succeeded, enqueues receipt",
+              "notes": [
+                "Race: the webhook can land before create_order has saved the order. find_by_intent returns None, the handler answers 200, the gateway never retries, and the order stays pending forever. Answer 5xx for an unknown intent, or save the order before calling create_intent.",
+                "No signature check on the webhook body: anyone can mark an order paid.",
+                "Not idempotent: a redelivered event enqueues a second receipt."
+              ],
+              "callers": [],
+              "diff": "@@ -0,0 +1,10 @@\n+def on_payment(event):\n+    if event[\"type\"] != \"payment.succeeded\":\n+        return 200\n+    order = find_by_intent(event[\"intent_id\"])\n+    if order is None:\n+        return 200\n+    order.status = \"paid\"\n+    save_order(order)\n+    queue.enqueue(send_receipt, order.id)\n+    return 200",
+              "label": "on_payment()"
+            },
+            {
+              "label": "find_by_intent()",
+              "status": "added",
+              "file": "shop/orders.py",
+              "line": 41,
+              "change": "looks an order up by its gateway intent id",
+              "callers": [],
+              "notes": "Linear scan over all orders, and intent_id has no index or unique constraint.",
+              "diff": "@@ -40,0 +41,5 @@\n+def find_by_intent(intent_id):\n+    for order in all_orders():\n+        if order.intent_id == intent_id:\n+            return order\n+    return None"
+            }
+          ],
+          "status": "added"
+        },
+        {
+          "id": "db",
+          "label": "orders table",
+          "shape": "store"
+        },
+        {
+          "id": "send_receipt",
+          "label": "Mail worker",
+          "functions": [
+            {
+              "status": "modified",
+              "file": "shop/mail.py",
+              "line": 4,
+              "change": "takes order_id, runs on the worker queue",
+              "callers": [
+                "admin/resend.py (still passes an Order object)"
+              ],
+              "diff": "@@ -4,3 +4,4 @@\n-def send_receipt(order):\n-    mailer.send(order.email, render(order))\n+def send_receipt(order_id):\n+    order = load_order(order_id)\n+    mailer.send(order.email, render(order))",
+              "label": "send_receipt()"
+            }
+          ]
+        }
+      ],
+      "edges": [
+        {
+          "from": "page",
+          "to": "create_order",
+          "label": "POST /orders",
+          "status": "unchanged"
+        },
+        {
+          "from": "create_order",
+          "to": "gateway",
+          "label": "charge(total), wait for capture",
+          "status": "removed"
+        },
+        {
+          "from": "create_order",
+          "to": "gateway",
+          "label": "create_intent(total)",
+          "status": "added"
+        },
+        {
+          "from": "gateway",
+          "to": "create_order",
+          "label": "intent_id",
+          "status": "added"
+        },
+        {
+          "from": "gateway",
+          "to": "on_payment",
+          "label": "payment.succeeded (async, may arrive now)",
+          "status": "added"
+        },
+        {
+          "from": "on_payment",
+          "to": "db",
+          "label": "find_by_intent(intent_id)",
+          "status": "added"
+        },
+        {
+          "from": "create_order",
+          "to": "db",
+          "label": "save(status=pending, intent_id)",
+          "status": "unchanged"
+        },
+        {
+          "from": "create_order",
+          "to": "send_receipt",
+          "label": "send_receipt(order)",
+          "status": "removed"
+        },
+        {
+          "from": "create_order",
+          "to": "page",
+          "label": "202 pending (was 201 paid)",
+          "status": "added"
+        },
+        {
+          "from": "on_payment",
+          "to": "db",
+          "label": "save(status=paid)",
+          "status": "added"
+        },
+        {
+          "from": "on_payment",
+          "to": "send_receipt",
+          "label": "enqueue(order.id)",
+          "status": "added"
+        }
+      ]
+    }
+  ]
+}
